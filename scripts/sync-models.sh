@@ -79,6 +79,10 @@ TOUCHED_FILES=()
 # <file> (so the later mv is a same-filesystem atomic rename, not a
 # cross-fs copy). Called as a plain statement, never via $(...), because it
 # must be able to exit the whole script on failure, not just a subshell.
+# Copies <file>'s existing permission bits onto the temp file — mktemp's
+# default mode (0600) would otherwise silently strip the +x bit off every
+# executable file this script touches (e.g. the cc-/cr-/cx-delegate.sh
+# scripts) once the mv lands.
 mktemp_for() {
   local file="$1"
   if ! TMP_OUT="$(mktemp "$(dirname "$file")/.sync-models.XXXXXX" 2>/dev/null)"; then
@@ -86,6 +90,9 @@ mktemp_for() {
     echo "reached: ${TOUCHED_FILES[*]:-<none>}" >&2
     echo "not reached: $file and everything after it in the file list" >&2
     exit 1
+  fi
+  if [[ -f "$file" ]]; then
+    chmod --reference="$file" "$TMP_OUT" 2>/dev/null || chmod "$(stat -f '%Mp%Lp' "$file" 2>/dev/null || stat -c '%a' "$file" 2>/dev/null)" "$TMP_OUT" 2>/dev/null || true
   fi
 }
 

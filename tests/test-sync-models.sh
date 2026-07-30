@@ -116,6 +116,7 @@ unrelated body
 # Codex reviewer delegation (cx-delegate.sh — <!-- model:codex_reviewer:label -->old label<!-- /model:codex_reviewer:label -->)
 unrelated body
 EOF
+  chmod 755 "$d/scripts/cc-delegate.sh" "$d/scripts/cr-delegate.sh" "$d/scripts/cx-delegate.sh"
 }
 
 # --- happy path: regenerates all five templated fields correctly ---
@@ -179,6 +180,8 @@ check "e2e codex_reviewer heading marker updated" "1" \
   "$(grep -c 'Fixture Codex Label' "$REPO/tests/e2e-smoke.md")"
 check "e2e reviewer heading STILL updated (no cross-write)" "1" \
   "$(grep -c 'Fixture Reviewer Label' "$REPO/tests/e2e-smoke.md")"
+check "regenerated executable script keeps its +x bit" "1" \
+  "$([ -x "$REPO/scripts/cc-delegate.sh" ] && echo 1 || echo 0)"
 rm -rf "$REPO"
 
 # --- --check fails loudly if a required marker pair is missing entirely ---
