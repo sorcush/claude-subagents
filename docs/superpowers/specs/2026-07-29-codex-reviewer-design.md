@@ -1,7 +1,7 @@
 # codex-reviewer — Design Spec
 
 **Date:** 2026-07-29
-**Status:** Approved for planning
+**Status:** Approved (independently reviewed by Cursor/Grok — Approve with fixes; fixes applied below)
 
 ## Goal
 
@@ -80,6 +80,16 @@ Code review of implemented changes remains out of scope, as with the existing re
 - **Resume**: `codex exec resume <SESSION_ID> [PROMPT] --json -m <model>`. The `resume`
   subcommand does not accept `-s/--sandbox` — it inherits the sandbox mode from the
   original session, which is `read-only` since that's how the session was started.
+- **Working root (`-C/--cd`)**: `codex exec` takes `-C, --cd <DIR>` — "use the specified
+  directory as its working root." Without it, the working root is whatever the delegator's
+  shell cwd happens to be, which is undefined (plugin root, a temp dir under test, etc.) —
+  unacceptable for the "explore the existing repo" grounding claim. `resume` has no
+  `-C`/`-s` of its own, so a resumed thread keeps exploring from the root the initial `exec`
+  established. See Component 1 step 4 for the concrete rule.
+- **`codex exec review`** (a built-in code-review subcommand) is intentionally not used here
+  — this plugin's review target is a spec/plan document, not a diff, and the existing
+  `exec [PROMPT]` + rubric-in-prompt approach is what `cr-delegate.sh` already does for the
+  Cursor reviewer.
 
 ## Components
 
@@ -88,18 +98,24 @@ Code review of implemented changes remains out of scope, as with the existing re
 The delegate script, structurally identical to `cr-delegate.sh` (same output discipline:
 **only the final STATUS JSON goes to stdout; all diagnostics/progress go to stderr**).
 
-**Arguments** (identical surface to `cr-delegate.sh`):
+**Arguments** (identical surface to `cr-delegate.sh`, plus one Codex-specific addition):
 - `--target spec|plan` (required)
 - `--doc-file <path>` (required)
 - `--spec-file <path>` (optional, for `plan` reviews)
 - `--lenses backend,frontend,ui` (optional, for `spec` reviews)
-- `--rubric-dir <path>` (defaults to `${CLAUDE_PLUGIN_ROOT}/rubrics` — the same directory
-  the Cursor reviewer uses; no new rubric files)
+- `--rubric-dir <path>` (defaults to `$SCRIPT_DIR/../rubrics`, matching `cr-delegate.sh`'s
+  actual default exactly — script-location-relative, not `CLAUDE_PLUGIN_ROOT`; no new rubric
+  files)
 - `--session <id>` (optional, resumes a prior Codex thread)
+- `--repo-root <path>` (optional; **new**, Codex-specific — see step 4. Defaults to the git
+  root containing `--doc-file`, resolved via `git -C "$(dirname "$DOC_FILE")" rev-parse
+  --show-toplevel`; if that fails — e.g. the doc isn't in a git repo — falls back to
+  `$SCRIPT_DIR/..`, the plugin's own repo root.)
 
 **Environment overrides** (mirrors `CR_CURSOR_BIN` / `CR_MODELS_JSON`):
 - `CX_CODEX_BIN` (default `codex`)
-- `CX_MODELS_JSON` (default `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/models.json`)
+- `CX_MODELS_JSON` (default `$SCRIPT_DIR/../.claude-plugin/models.json`, matching
+  `cr-delegate.sh`'s `CR_MODELS_JSON` default exactly)
 
 **Behavior:**
 1. Validate args exactly as `cr-delegate.sh` does (unknown/missing args exit 2; unreadable
@@ -109,22 +125,29 @@ The delegate script, structurally identical to `cr-delegate.sh` (same output dis
 3. Assemble the prompt from the **same rubric files** as `cr-delegate.sh` (role preamble +
    target rubric + selected lenses + `_output-format.md` + instruction to explore the
    existing repo + pointers to `--doc-file`/`--spec-file`).
-4. Run:
+4. Resolve `REPO_ROOT` per the `--repo-root` rule above, then run:
    ```
-   codex exec --json -s read-only -m "$MODEL" "$PROMPT" < /dev/null
+   codex exec --json -s read-only -C "$REPO_ROOT" -m "$MODEL" "$PROMPT" < /dev/null
    ```
-   or, when `--session` is given:
+   or, when `--session` is given (no `-C`/`-s` on `resume` — it inherits the root and
+   sandbox the session was originally started with):
    ```
    codex exec resume "$SESSION" --json -m "$MODEL" "$PROMPT" < /dev/null
    ```
-   Render non-final `item.completed` events (and their tool-call equivalents) to stderr as
-   progress. Capture `thread.started.thread_id` as the session id.
+   Render `item.completed` events whose `item.type` is not `agent_message` (e.g. tool-call
+   or command-execution items, if Codex emits them) to stderr as progress, best-effort —
+   any event type not recognized is ignored for progress rendering, not treated as an error.
+   Capture `thread.started.thread_id` as the session id.
 5. Determine the report: the **last** `item.completed` event whose `item.type` is
    `"agent_message"`, taking `.item.text`.
 6. Treat as failure (→ `BLOCKED`): non-zero exit, a `turn.failed` event present, no
    `agent_message` item found, or an empty report text.
 7. Emit one JSON line:
    `{"status":"REVIEWED"|"BLOCKED","session_id":...,"target":...,"lenses":...,"report":...,"diagnostic":...}`.
+
+**Exit codes** (matching `cr-delegate.sh` exactly): `0` on `REVIEWED`; `1` on `BLOCKED`
+(CLI failure, `turn.failed`, or empty report); `2` on argument/validation failure (bad args,
+unreadable files, missing rubric, missing/invalid model config).
 
 **No verify loop, no commit, no retries** — same as `cr-delegate.sh`: one read-only pass;
 `session_id` is returned so the controller can dispatch a resumed follow-up.
@@ -141,8 +164,9 @@ for Codex:
 - **Hard contract:** never edits files, never writes code, never decides whether a finding
   is valid, never filters/reorders findings, never fabricates a report — a script `BLOCKED`
   is reported as `BLOCKED` with the diagnostic, and that's the end of its job.
-- Report format: `Status` (REVIEWED | BLOCKED), the verbatim review, `session_id` (required,
-  copied verbatim), and any script diagnostic on BLOCKED.
+- Report format: `Status` (REVIEWED | BLOCKED), the verbatim review, `session_id` (copied
+  verbatim; empty together with BLOCKED is expected when Codex never started a thread — not
+  an additional error condition), and any script diagnostic on BLOCKED.
 
 ### 3. `commands/codex-review.md`
 
@@ -166,10 +190,12 @@ for Codex:
 5. **Present** triaged findings to the user; offer a fix → re-review loop (resume via the
    returned `session_id`).
 6. **Review Effectiveness Summary** (always): print it and append a dated entry to
-   `docs/cursor-reviewer/effectiveness-log.md` (same shared log as the Cursor reviewer, so
-   effectiveness across both reviewers is comparable over time) — target, doc, lenses,
-   reviewer used (**Codex/GPT-5.6 Sol**), finding counts by severity, triage outcome,
-   environment friction, recommendations.
+   `docs/cursor-reviewer/effectiveness-log.md` (same shared log file as the Cursor reviewer).
+   Both `/cursor-review` and `/codex-review` summaries adopt one shared schema so entries
+   are comparable across reviewers — this is a small, additive change to `/cursor-review`'s
+   existing summary format (its own review behavior is unchanged, only the log line gains a
+   field): **Reviewer:** Cursor/Grok 4.5 | Codex/GPT-5.6 Sol, then target, doc, lenses,
+   finding counts by severity, triage outcome, environment friction, recommendations.
 
 ### 4. `rubrics/`
 
@@ -200,10 +226,20 @@ consistent with how `coder`/`reviewer` are already handled, and lower-risk than 
   Grok 4.5 (review via cursor-agent), GPT-5.6 Sol (review via Codex CLI).
 - New frontmatter regen call for `agents/codex-reviewer-delegator.md` and
   `commands/codex-review.md` (description lines mentioning GPT-5.6 Sol).
-- New `MARKER_TARGETS` entries: `README.md:codex_reviewer`,
-  `agents/codex-reviewer-delegator.md:codex_reviewer`,
+- **`regen_markers` must become a three-way map, not stay binary.** Today it's
+  `if [[ "$which" == "coder" ]]; then value="$CODER_LABEL"; else value="$REVIEWER_LABEL";
+  fi` — a bare `else` that would silently write Grok's label into any `codex_reviewer`
+  marker span. Change it to an explicit three-way dispatch (`coder` → `CODER_LABEL`,
+  `reviewer` → `REVIEWER_LABEL`, `codex_reviewer` → `CODEX_REVIEWER_LABEL`; any other value
+  is an error), with marker tag `model:codex_reviewer:label` for the new role — same
+  `<!-- model:$which:label -->...<!-- /model:$which:label -->` convention as the other two.
+- New `MARKER_TARGETS` entries (all resolved through the fixed three-way `regen_markers`):
+  `README.md:codex_reviewer`, `agents/codex-reviewer-delegator.md:codex_reviewer`,
   `commands/codex-review.md:codex_reviewer`, `scripts/cx-delegate.sh:codex_reviewer`,
   `tests/e2e-smoke.md:codex_reviewer`.
+- `tests/test-sync-models.sh` fixtures must gain a `codex_reviewer` entry alongside
+  `coder`/`reviewer`, and gain a case asserting the three-way dispatch doesn't cross-write
+  labels (e.g. a `codex_reviewer` marker never receives `REVIEWER_LABEL`).
 
 ### 7. `README.md`
 
@@ -213,16 +249,35 @@ consistent with how `coder`/`reviewer` are already handled, and lower-risk than 
 - Requirements: `codex` CLI installed and logged in (`codex login status` / `codex login`).
 - Usage section: `/codex-review spec <spec-path>` / `/codex-review plan <plan-path>
   <spec-path>` examples alongside the existing Cursor ones.
+- Tests section gains `bash tests/test-cx-delegate.sh` alongside the existing test commands.
 - Explicit statement of the **ask-which-reviewer convention**: at the brainstorming Spec
   self-review gate and the writing-plans Self-Review gate, ask the user whether to use the
-  Cursor/Grok reviewer or the Codex/GPT-5.6 Sol reviewer before running either command.
+  Cursor/Grok reviewer or the Codex/GPT-5.6 Sol reviewer before running either command. This
+  is documentation convention only (the superpowers skills themselves aren't edited, per the
+  precedent set by the original cursor-reviewer design) — it does not change what either
+  command does when invoked directly.
+- A one-line discoverability pointer added to **both** `commands/cursor-review.md` and
+  `commands/codex-review.md` ("a second independent reviewer is available: /codex-review" /
+  "/cursor-review" respectively), so a controller reading either command file — not just the
+  README — knows the other exists. This does not change either command's review behavior,
+  only makes the other option discoverable in-context.
 
 ### 8. Plumbing
 
 - `.claude-plugin/plugin.json` — description regenerated by `sync-models.sh` to mention all
-  three models; `keywords` gains `codex`; `version` bumped per the normal release flow (not
-  part of this spec — happens at release time).
+  three models; `keywords` gains `codex` as a **one-time manual edit** in this change
+  (`sync-models.sh` never touches `keywords` for any role, and this doesn't change that);
+  `version` bumped per the normal release flow (not part of this spec — happens at release
+  time).
 - `Makefile` — no changes; existing `bump-*`/`release` targets apply unchanged.
+- **Security/observability posture** (matching the Cursor reviewer's, made explicit for
+  Codex): never pass `--dangerously-bypass-approvals-and-sandbox` or
+  `--dangerously-bypass-hook-trust`. Review text and prompts may persist in Codex's own
+  session storage under the user's `$CODEX_HOME` (same category of exposure as
+  `cursor-agent` sessions today) — no new secret-handling is introduced, but this is worth
+  a README callout. No invocation timeout is imposed, consistent with the Cursor reviewer's
+  existing no-timeout posture; a bounded-timeout option remains a future enhancement for
+  both, not scoped here.
 
 ## Data flow
 
@@ -232,7 +287,7 @@ consistent with how `coder`/`reviewer` are already handled, and lower-risk than 
   → lens detection (backend [+frontend +ui])
   → dispatch codex-reviewer-delegator(target, doc, lenses)
       → cx-delegate.sh assembles prompt (rubric + lenses + output-format)
-      → codex exec --json -s read-only -m gpt-5.6-sol  (reads doc + explores repo)
+      → codex exec --json -s read-only -C <repo-root> -m gpt-5.6-sol  (reads doc + explores repo)
       → emits {status, session_id, target, lenses, report}
   → delegator relays report + session_id verbatim
   → Opus triages via superpowers:receiving-code-review
@@ -255,17 +310,20 @@ runs the corresponding command as above.
 | Empty report | Script `BLOCKED` — never fabricated. |
 | Delegator sees BLOCKED | Reports BLOCKED verbatim; never improvises a review. |
 | Reviewer attempts a file edit | Impossible: `-s read-only` sandbox **and** delegator has no Write/Edit tools. |
+| `--doc-file` not inside a git repo | `--repo-root` resolution falls back to the plugin's own repo root (`$SCRIPT_DIR/..`) rather than failing. |
 
 ## Testing strategy
 
 - **Unit** (`tests/test-cx-delegate.sh` against `tests/mock-codex`, mirroring
-  `test-cr-delegate.sh`): arg validation and exit codes; model resolution from
-  `.codex_reviewer.id` (including `CX_MODELS_JSON` override, missing file, missing field);
-  REVIEWED happy path with captured `session_id` (from `thread.started`) and `report` (from
-  the last `agent_message`); BLOCKED on CLI failure, on a `turn.failed` event, and on an
-  empty report; correct lens rubric assembly into the prompt; presence of `-s read-only` and
-  absence of a hardcoded model literal in the invoked command line; `--session` maps to
-  `codex exec resume <session>`.
+  `test-cr-delegate.sh`): arg validation and exit codes (`0`/`1`/`2` per the contract above);
+  model resolution from `.codex_reviewer.id` (including `CX_MODELS_JSON` override, missing
+  file, missing field); REVIEWED happy path with captured `session_id` (from
+  `thread.started`) and `report` (from the last `agent_message`); BLOCKED on CLI failure, on
+  a `turn.failed` event, and on an empty report; correct lens rubric assembly into the
+  prompt; presence of `-s read-only` and `-C <repo-root>` and absence of a hardcoded model
+  literal in the invoked command line; `--repo-root` resolution (git-root success case and
+  non-git fallback case); `--session` maps to `codex exec resume <session>` with no `-C`/`-s`
+  on that invocation.
 - **`tests/mock-codex`**: a stand-in for the `codex` binary, controllable via env vars
   (mirroring `mock-cursor-agent`'s `MOCK_SESSION`, `MOCK_RESULT`, `MOCK_FAIL_CLI`,
   `MOCK_STDERR`, `MOCK_LOG`) to emit the JSONL shapes documented above (`thread.started`,
