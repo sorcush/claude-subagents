@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Mock of `codex` for cx-delegate.sh unit tests. Mimics verified real behavior of
+# `codex exec --json` / `codex exec resume --json`:
+#   - prints newline-delimited JSON events to stdout
+#   - exits 0 on success, 1 on simulated failure
+# Controls (env vars):
+#   MOCK_FAIL_CLI=1      -> print a plain-text error to stderr, exit 1, no stdout JSON
+#   MOCK_STDERR=<text>   -> also write this text to stderr
+#   MOCK_TURN_FAILED=1   -> emit thread.started + a turn.failed event, exit 1
+#   MOCK_SESSION=<id>    -> thread_id to emit (default mock-thread-1)
+#   MOCK_RESULT=<text>   -> agent_message text to emit (default "done"; empty stays empty)
+#   MOCK_STREAM=1        -> emit a non-agent_message item.completed event before the final one
+#   MOCK_LOG=<path>      -> append "ARGS: $*" (all argv, incl. the prompt) to this file
+set -euo pipefail
+
+if [[ -n "${MOCK_LOG:-}" ]]; then echo "ARGS: $*" >> "$MOCK_LOG"; fi
+if [[ -n "${MOCK_STDERR:-}" ]]; then echo "$MOCK_STDERR" >&2; fi
+
+session="${MOCK_SESSION:-mock-thread-1}"
+result="${MOCK_RESULT-done}"
+
+if [[ "${MOCK_FAIL_CLI:-0}" == "1" ]]; then
+  echo "codex: simulated CLI failure" >&2
+  exit 1
+fi
+
+printf '{"type":"thread.started","thread_id":"%s"}\n' "$session"
+printf '{"type":"turn.started"}\n'
+
+if [[ "${MOCK_TURN_FAILED:-0}" == "1" ]]; then
+  printf '{"type":"turn.failed","error":{"message":"simulated provider error"}}\n'
+  exit 1
+fi
+
+if [[ "${MOCK_STREAM:-0}" == "1" ]]; then
+  printf '{"type":"item.completed","item":{"id":"item_pre","type":"reasoning","text":"exploring README.md"}}\n'
+fi
+
+printf '{"type":"item.completed","item":{"id":"item_final","type":"agent_message","text":"%s"}}\n' "$result"
+printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
+exit 0
