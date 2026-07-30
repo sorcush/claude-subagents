@@ -103,3 +103,68 @@ exit code 1, and a `diagnostic` explaining the auth/trust failure. No fabricated
 ```bash
 rm -rf "$tmp"
 ```
+
+---
+
+# Codex reviewer delegation (cx-delegate.sh — <!-- model:codex_reviewer:label -->GPT-5.6 Sol<!-- /model:codex_reviewer:label -->)
+
+Prereqs: `codex login status` shows logged in; the probe below returns `READY`:
+```bash
+CODEX_REVIEWER_MODEL=$(jq -er '.codex_reviewer.id // empty' "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/models.json")
+if [[ -z "$CODEX_REVIEWER_MODEL" ]]; then
+  echo "error: could not read .codex_reviewer.id from models.json"; exit 2
+fi
+codex exec --json -s read-only -m "$CODEX_REVIEWER_MODEL" "Reply with the single word READY." < /dev/null
+```
+
+## Setup
+```bash
+tmp=$(mktemp -d); cd "$tmp"
+git init -q && git commit -q --allow-empty -m "init"
+cat > spec.md <<'EOF'
+# Widget Cache Design
+Goal: add an in-memory cache for widget lookups.
+Architecture: a singleton map keyed by widget id, no eviction.
+EOF
+```
+
+## R1. Spec review (happy path)
+```bash
+bash "$CLAUDE_PLUGIN_ROOT/scripts/cx-delegate.sh" \
+  --target spec --doc-file "$tmp/spec.md" --lenses backend
+```
+Expect: stdout is ONE JSON line with `"status":"REVIEWED"`, a non-empty `"report"`,
+a real `"session_id"`, and `"lenses":["backend"]`. The report should follow the
+output format (Summary / Strengths / Issues / Verdict) and likely flag the "no
+eviction" unbounded-growth risk. No files in `$tmp` were modified.
+
+## R2. Plan review against a spec
+```bash
+cat > plan.md <<'EOF'
+# Widget Cache Implementation Plan
+Task 1: add cache.py with get(id) and set(id, val).
+EOF
+bash "$CLAUDE_PLUGIN_ROOT/scripts/cx-delegate.sh" \
+  --target plan --doc-file "$tmp/plan.md" --spec-file "$tmp/spec.md"
+```
+Expect: `"status":"REVIEWED"`, `"target":"plan"`; the report should note missing
+eviction coverage / thin task decomposition relative to the spec.
+
+## R3. BLOCKED path (logged out)
+Temporarily log out (or unset auth) and re-run command R1. Expect `"status":"BLOCKED"`,
+exit code 1, and a `diagnostic` explaining the failure. No fabricated review.
+
+## R4. Resume across rounds
+```bash
+SESSION=$(bash "$CLAUDE_PLUGIN_ROOT/scripts/cx-delegate.sh" \
+  --target spec --doc-file "$tmp/spec.md" --lenses backend | jq -r .session_id)
+bash "$CLAUDE_PLUGIN_ROOT/scripts/cx-delegate.sh" \
+  --target spec --doc-file "$tmp/spec.md" --lenses backend --session "$SESSION"
+```
+Expect: second call also returns `"status":"REVIEWED"` and the same `"session_id"`,
+demonstrating `codex exec resume` picks the thread back up.
+
+## Cleanup
+```bash
+rm -rf "$tmp"
+```
