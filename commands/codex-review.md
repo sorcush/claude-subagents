@@ -1,15 +1,15 @@
 ---
-description: Get an independent Grok 4.5 (high effort, fast) review of a design spec or implementation plan, removing the bias of self-review. Usage: /cursor-review <spec|plan> <doc-path> [spec-path]
+description: Get an independent <!-- model:codex_reviewer:label -->GPT-5.6 Sol<!-- /model:codex_reviewer:label --> review of a design spec or implementation plan, removing the bias of self-review. Usage: /codex-review <spec|plan> <doc-path> [spec-path]
 argument-hint: <spec|plan> <doc-path> [spec-path]
 ---
 
 You are the **controller**. You will obtain an INDEPENDENT review of the document
-named in `$ARGUMENTS` by delegating to <!-- model:reviewer:label -->Grok 4.5 (high effort, fast)<!-- /model:reviewer:label --> through the
-`cursor-reviewer-delegator` subagent. You do NOT review it yourself — that is the
+named in `$ARGUMENTS` by delegating to <!-- model:codex_reviewer:label -->GPT-5.6 Sol<!-- /model:codex_reviewer:label --> through the
+`codex-reviewer-delegator` subagent. You do NOT review it yourself — that is the
 point: the model that authored the document must not be the one that grades it.
 
-A second independent reviewer, <!-- model:codex_reviewer:label -->GPT-5.6 Sol<!-- /model:codex_reviewer:label -->, is also
-available via `/codex-review`. Use whichever the user asked for; if they didn't say,
+A second independent reviewer, <!-- model:reviewer:label -->Grok 4.5 (high effort, fast)<!-- /model:reviewer:label -->, is also
+available via `/cursor-review`. Use whichever the user asked for; if they didn't say,
 ask.
 
 ## Parse arguments
@@ -20,19 +20,18 @@ ask.
 ## Preflight (do this first, stop on failure)
 
 1. **Doc exists?** Confirm `doc-path` is a readable file. If not, tell the user and stop.
-2. **cursor-agent healthy? Probe for real** — `cursor-agent status` is NOT enough. Run
-   an actual read-only headless probe:
+2. **codex healthy? Probe for real** — do not trust cached login state alone. Run an
+   actual read-only headless probe:
    ```
-   REVIEWER_MODEL=$(jq -er '.reviewer.id // empty' "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/models.json")
-   if [[ -z "$REVIEWER_MODEL" ]]; then
-     echo "error: could not read .reviewer.id from models.json"; exit 2
+   CODEX_REVIEWER_MODEL=$(jq -er '.codex_reviewer.id // empty' "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/models.json")
+   if [[ -z "$CODEX_REVIEWER_MODEL" ]]; then
+     echo "error: could not read .codex_reviewer.id from models.json"; exit 2
    fi
-   cursor-agent -p --force --trust --mode ask --model "$REVIEWER_MODEL" "Reply with the single word READY."
+   codex exec --json -s read-only -m "$CODEX_REVIEWER_MODEL" "Reply with the single word READY." < /dev/null
    ```
-   If it does not return `READY` (auth error, "Workspace Trust Required", timeout, or
-   anything else), tell the user to run `cursor-agent login` (suggest they type
-   `! cursor-agent login`) and STOP. (Note: `timeout` is not on macOS by default — do
-   not wrap the probe in it.)
+   If the run exits non-zero, emits a `turn.failed` event, or the final `agent_message`
+   text is not `READY` (auth error, timeout, or anything else), tell the user to run
+   `codex login` (suggest they type `! codex login`) and STOP.
 
 ## Determine lenses (spec reviews only)
 
@@ -47,7 +46,7 @@ once. For `target plan`, do not pass lenses.
 
 ## Dispatch the reviewer
 
-Dispatch the **`cursor-reviewer-delegator`** subagent (NOT a general-purpose
+Dispatch the **`codex-reviewer-delegator`** subagent (NOT a general-purpose
 subagent). Give it:
 - the `target` (`spec` or `plan`),
 - the `doc-path`,
@@ -58,8 +57,8 @@ It shells to the read-only reviewer and returns the report verbatim, plus a
 `session_id` and a `status` (REVIEWED | BLOCKED).
 
 If it returns **BLOCKED**, surface the diagnostic to the user and stop — do not
-fabricate a review or substitute your own. Fixing the environment (login, trust) is
-the user's job.
+fabricate a review or substitute your own. Fixing the environment (login) is the
+user's job.
 
 ## Act on the review (you, Opus)
 
@@ -81,13 +80,14 @@ and append it as a dated entry to `docs/cursor-reviewer/effectiveness-log.md` in
 working repo (create the dir/file if missing; if not writable or the user objects,
 just print it and say where it would have gone). Capture:
 
+- **Reviewer:** Codex/GPT-5.6 Sol.
 - **Run:** date · target · doc path · lenses used.
 - **Findings:** count by severity (Critical/Important/Minor) · the reviewer's verdict.
 - **Triage outcome:** how many findings you accepted vs pushed back on, and why.
 - **Reviewer quality:** were findings specific and codebase-grounded, or vague? Any
   false positives (flagged a non-issue) or things it missed that you caught?
-- **Environment friction:** auth/trust/timeout, BLOCKED, missing `session_id`.
-- **Recommendations:** concrete changes to the rubrics, lens selection, or dispatch
-  prompt that would improve the next review.
+- **Environment friction:** auth/timeout, BLOCKED, missing `session_id`.
+- **Recommendations:** concrete changes to the rubrics or dispatch prompt that would
+  improve the next review.
 
 Base every line on what actually happened this run — do not invent metrics.
