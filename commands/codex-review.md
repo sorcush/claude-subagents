@@ -1,5 +1,5 @@
 ---
-description: Get an independent <!-- model:codex_reviewer:label -->GPT-5.6 Sol<!-- /model:codex_reviewer:label --> review of a design spec or implementation plan, removing the bias of self-review. Usage: /codex-review <spec|plan> <doc-path> [spec-path]
+description: Get an independent GPT-5.6 Sol review of a design spec or implementation plan, removing the bias of self-review. Usage: /codex-review <spec|plan> <doc-path> [spec-path]
 argument-hint: <spec|plan> <doc-path> [spec-path]
 ---
 
