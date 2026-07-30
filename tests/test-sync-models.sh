@@ -19,7 +19,7 @@ make_fixture_repo() {  # make_fixture_repo <dir>
   local d="$1"
   mkdir -p "$d/.claude-plugin" "$d/agents" "$d/commands" "$d/scripts" "$d/tests"
   cat > "$d/.claude-plugin/models.json" <<'EOF'
-{"coder": {"id": "fixture-coder", "label": "Fixture Coder Label"}, "reviewer": {"id": "fixture-reviewer", "label": "Fixture Reviewer Label"}}
+{"coder": {"id": "fixture-coder", "label": "Fixture Coder Label"}, "reviewer": {"id": "fixture-reviewer", "label": "Fixture Reviewer Label"}, "codex_reviewer": {"id": "fixture-codex", "label": "Fixture Codex Label"}}
 EOF
   cat > "$d/.claude-plugin/plugin.json" <<'EOF'
 {
@@ -50,6 +50,15 @@ tools: Bash, Read
 ---
 You hand one review job to <!-- model:reviewer:label -->old label<!-- /model:reviewer:label --> via a script.
 EOF
+  cat > "$d/agents/codex-reviewer-delegator.md" <<'EOF'
+---
+name: codex-reviewer-delegator
+description: placeholder
+model: haiku
+tools: Bash, Read
+---
+You hand one review job to <!-- model:codex_reviewer:label -->old label<!-- /model:codex_reviewer:label --> via a script.
+EOF
   cat > "$d/commands/cursor-implement-plans.md" <<'EOF'
 ---
 description: placeholder
@@ -64,18 +73,26 @@ argument-hint: <path>
 ---
 named in `$ARGUMENTS` by delegating to <!-- model:reviewer:label -->old label<!-- /model:reviewer:label --> through the subagent.
 EOF
+  cat > "$d/commands/codex-review.md" <<'EOF'
+---
+description: placeholder
+argument-hint: <path>
+---
+named in `$ARGUMENTS` by delegating to <!-- model:codex_reviewer:label -->old label<!-- /model:codex_reviewer:label --> through the subagent.
+EOF
   cat > "$d/README.md" <<'EOF'
 # fixture readme
 
 - **Implementation** is delegated to Cursor's **<!-- model:coder:label -->old label<!-- /model:coder:label -->**.
-- **Independent review** is delegated to **<!-- model:reviewer:label -->old label<!-- /model:reviewer:label -->**.
+- **Independent review** is delegated to **<!-- model:reviewer:label -->old label<!-- /model:reviewer:label -->** or **<!-- model:codex_reviewer:label -->old label<!-- /model:codex_reviewer:label -->**.
 
 | agent | Delegates to |
 |---|---|
 | coder | <!-- model:coder:label -->old label<!-- /model:coder:label --> |
 | reviewer | <!-- model:reviewer:label -->old label<!-- /model:reviewer:label --> (read-only) |
+| codex_reviewer | <!-- model:codex_reviewer:label -->old label<!-- /model:codex_reviewer:label --> (read-only) |
 
-Usage: (delegates to <!-- model:reviewer:label -->old label<!-- /model:reviewer:label -->)
+Usage: (delegates to <!-- model:reviewer:label -->old label<!-- /model:reviewer:label --> or <!-- model:codex_reviewer:label -->old label<!-- /model:codex_reviewer:label -->)
 EOF
   cat > "$d/scripts/cc-delegate.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -87,8 +104,16 @@ EOF
 # cr-delegate.sh — delegate ONE review to <!-- model:reviewer:label -->old label<!-- /model:reviewer:label -->.
 echo unrelated body
 EOF
+  cat > "$d/scripts/cx-delegate.sh" <<'EOF'
+#!/usr/bin/env bash
+# cx-delegate.sh — delegate ONE review to <!-- model:codex_reviewer:label -->old label<!-- /model:codex_reviewer:label -->.
+echo unrelated body
+EOF
   cat > "$d/tests/e2e-smoke.md" <<'EOF'
 # Reviewer delegation (cr-delegate.sh — <!-- model:reviewer:label -->old label<!-- /model:reviewer:label -->)
+unrelated body
+
+# Codex reviewer delegation (cx-delegate.sh — <!-- model:codex_reviewer:label -->old label<!-- /model:codex_reviewer:label -->)
 unrelated body
 EOF
 }
@@ -133,6 +158,26 @@ check "script header marker updated, stays on comment line" "1" \
   "$(grep -c '^# cc-delegate.sh.*Fixture Coder Label' "$REPO/scripts/cc-delegate.sh")"
 check "script body untouched" "1" "$(grep -c 'unrelated body' "$REPO/scripts/cc-delegate.sh")"
 check "e2e heading marker updated" "1" \
+  "$(grep -c 'Fixture Reviewer Label' "$REPO/tests/e2e-smoke.md")"
+check "plugin.json description mentions codex_reviewer label" "1" \
+  "$(jq -r '.description' "$REPO/.claude-plugin/plugin.json" | grep -c 'Fixture Codex Label')"
+check "marketplace.json description mentions codex_reviewer label" "1" \
+  "$(jq -r '.plugins[0].description' "$REPO/.claude-plugin/marketplace.json" | grep -c 'Fixture Codex Label')"
+check "codex_reviewer agent frontmatter description updated" "1" \
+  "$(grep '^description:' "$REPO/agents/codex-reviewer-delegator.md" | grep -c 'Fixture Codex Label')"
+check "codex_reviewer command frontmatter description updated" "1" \
+  "$(grep '^description:' "$REPO/commands/codex-review.md" | grep -c 'Fixture Codex Label')"
+check "README codex_reviewer table cell updated, read-only suffix survives" "1" \
+  "$(grep -c 'Fixture Codex Label.*(read-only)' "$REPO/README.md")"
+check "README reviewer table cell STILL updated (no cross-write)" "1" \
+  "$(grep -c 'Fixture Reviewer Label.*(read-only)' "$REPO/README.md")"
+check "README no old-label text remains" "0" "$(grep -c 'old label' "$REPO/README.md")"
+check "codex_reviewer script header marker updated, stays on comment line" "1" \
+  "$(grep -c '^# cx-delegate.sh.*Fixture Codex Label' "$REPO/scripts/cx-delegate.sh")"
+check "codex_reviewer script body untouched" "1" "$(grep -c 'unrelated body' "$REPO/scripts/cx-delegate.sh")"
+check "e2e codex_reviewer heading marker updated" "1" \
+  "$(grep -c 'Fixture Codex Label' "$REPO/tests/e2e-smoke.md")"
+check "e2e reviewer heading STILL updated (no cross-write)" "1" \
   "$(grep -c 'Fixture Reviewer Label' "$REPO/tests/e2e-smoke.md")"
 rm -rf "$REPO"
 

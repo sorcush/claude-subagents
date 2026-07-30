@@ -34,8 +34,10 @@ CODER_ID="$(jq -r '.coder.id // empty' "$MODELS_JSON")"
 CODER_LABEL="$(jq -r '.coder.label // empty' "$MODELS_JSON")"
 REVIEWER_ID="$(jq -r '.reviewer.id // empty' "$MODELS_JSON")"
 REVIEWER_LABEL="$(jq -r '.reviewer.label // empty' "$MODELS_JSON")"
+CODEX_REVIEWER_ID="$(jq -r '.codex_reviewer.id // empty' "$MODELS_JSON")"
+CODEX_REVIEWER_LABEL="$(jq -r '.codex_reviewer.label // empty' "$MODELS_JSON")"
 
-for name_val in "coder.id:$CODER_ID" "coder.label:$CODER_LABEL" "reviewer.id:$REVIEWER_ID" "reviewer.label:$REVIEWER_LABEL"; do
+for name_val in "coder.id:$CODER_ID" "coder.label:$CODER_LABEL" "reviewer.id:$REVIEWER_ID" "reviewer.label:$REVIEWER_LABEL" "codex_reviewer.id:$CODEX_REVIEWER_ID" "codex_reviewer.label:$CODEX_REVIEWER_LABEL"; do
   name="${name_val%%:*}"
   val="${name_val#*:}"
   if [[ -z "$val" ]]; then
@@ -49,6 +51,9 @@ if [[ ! "$CODER_ID" =~ $ID_RE ]]; then
 fi
 if [[ ! "$REVIEWER_ID" =~ $ID_RE ]]; then
   echo "error: .reviewer.id '$REVIEWER_ID' violates the allowed charset $ID_RE" >&2; exit 2
+fi
+if [[ ! "$CODEX_REVIEWER_ID" =~ $ID_RE ]]; then
+  echo "error: .codex_reviewer.id '$CODEX_REVIEWER_ID' violates the allowed charset $ID_RE" >&2; exit 2
 fi
 
 check_label_charset() {  # check_label_charset <field-name> <value>
@@ -65,6 +70,7 @@ check_label_charset() {  # check_label_charset <field-name> <value>
 }
 check_label_charset "coder.label" "$CODER_LABEL"
 check_label_charset "reviewer.label" "$REVIEWER_LABEL"
+check_label_charset "codex_reviewer.label" "$CODEX_REVIEWER_LABEL"
 
 STALE_FILES=()
 TOUCHED_FILES=()
@@ -133,11 +139,16 @@ regen_frontmatter_description() {
   atomic_write "$file" "$tmp"
 }
 
-# regen_markers <file> <which: coder|reviewer>
+# regen_markers <file> <which: coder|reviewer|codex_reviewer>
 regen_markers() {
   local file="$1" which="$2" value tag
   [[ ! -f "$file" ]] && { echo "error: expected file missing: $file" >&2; exit 2; }
-  if [[ "$which" == "coder" ]]; then value="$CODER_LABEL"; else value="$REVIEWER_LABEL"; fi
+  case "$which" in
+    coder)          value="$CODER_LABEL" ;;
+    reviewer)       value="$REVIEWER_LABEL" ;;
+    codex_reviewer) value="$CODEX_REVIEWER_LABEL" ;;
+    *) echo "error: regen_markers: unknown role '$which'" >&2; exit 2 ;;
+  esac
   tag="model:$which:label"
   if ! grep -q -- "<!-- $tag -->" "$file"; then
     echo "error: required marker <!-- $tag --> missing from $file" >&2
@@ -152,8 +163,8 @@ regen_markers() {
 }
 
 # --- plugin.json / marketplace.json descriptions (keywords is never touched) ---
-PLUGIN_DESC="Delegate implementation to Cursor's ${CODER_LABEL} and independent design-spec/plan review to ${REVIEWER_LABEL} via cursor-agent, while Claude/Opus plans, decides, and reviews."
-MARKETPLACE_DESC="Two Cursor-backed delegation subagents: ${CODER_LABEL} for implementation and ${REVIEWER_LABEL} for independent design/plan review."
+PLUGIN_DESC="Delegate implementation to Cursor's ${CODER_LABEL}, and independent design-spec/plan review to ${REVIEWER_LABEL} via cursor-agent or ${CODEX_REVIEWER_LABEL} via the Codex CLI, while Claude/Opus plans, decides, and reviews."
+MARKETPLACE_DESC="Delegation subagents: ${CODER_LABEL} for implementation, and independent design/plan review via ${REVIEWER_LABEL} (cursor-agent) or ${CODEX_REVIEWER_LABEL} (Codex CLI)."
 
 regen_json_field_arg "$REPO_DIR/.claude-plugin/plugin.json" '.description = $d' "$PLUGIN_DESC"
 regen_json_field_arg "$REPO_DIR/.claude-plugin/marketplace.json" '.plugins[0].description = $d' "$MARKETPLACE_DESC"
@@ -163,11 +174,15 @@ CODER_AGENT_DESC="Delegates a single implementation task to Cursor's ${CODER_LAB
 REVIEWER_AGENT_DESC="Delegates an independent design-spec or implementation-plan review to ${REVIEWER_LABEL} via cursor-agent in read-only mode, and relays the report. Use as the reviewer when an independent, unbiased review of a spec or plan is needed. Does not author, judge, or edit — it delegates and relays."
 CODER_CMD_DESC="Implement a written plan by delegating each task to Cursor's ${CODER_LABEL} (via the cursor-coder-delegator subagent), while Opus reviews. Usage: /cursor-implement-plans <plan-path>"
 REVIEWER_CMD_DESC="Get an independent ${REVIEWER_LABEL} review of a design spec or implementation plan, removing the bias of self-review. Usage: /cursor-review <spec|plan> <doc-path> [spec-path]"
+CODEX_REVIEWER_AGENT_DESC="Delegates an independent design-spec or implementation-plan review to ${CODEX_REVIEWER_LABEL} via the Codex CLI (\`codex exec\`) in a read-only sandbox, and relays the report. Use as the reviewer when an independent, unbiased review of a spec or plan is needed from a different vendor/model than the Cursor/Grok reviewer. Does not author, judge, or edit — it delegates and relays."
+CODEX_REVIEWER_CMD_DESC="Get an independent ${CODEX_REVIEWER_LABEL} review of a design spec or implementation plan, removing the bias of self-review. Usage: /codex-review <spec|plan> <doc-path> [spec-path]"
 
 regen_frontmatter_description "$REPO_DIR/agents/cursor-coder-delegator.md" "$CODER_AGENT_DESC"
 regen_frontmatter_description "$REPO_DIR/agents/cursor-reviewer-delegator.md" "$REVIEWER_AGENT_DESC"
 regen_frontmatter_description "$REPO_DIR/commands/cursor-implement-plans.md" "$CODER_CMD_DESC"
 regen_frontmatter_description "$REPO_DIR/commands/cursor-review.md" "$REVIEWER_CMD_DESC"
+regen_frontmatter_description "$REPO_DIR/agents/codex-reviewer-delegator.md" "$CODEX_REVIEWER_AGENT_DESC"
+regen_frontmatter_description "$REPO_DIR/commands/codex-review.md" "$CODEX_REVIEWER_CMD_DESC"
 
 # --- marker-wrapped spans ---
 # file:tag pairs this repo requires. Extend this list if a new file gains a
@@ -175,13 +190,18 @@ regen_frontmatter_description "$REPO_DIR/commands/cursor-review.md" "$REVIEWER_C
 MARKER_TARGETS=(
   "$REPO_DIR/README.md:coder"
   "$REPO_DIR/README.md:reviewer"
+  "$REPO_DIR/README.md:codex_reviewer"
   "$REPO_DIR/agents/cursor-coder-delegator.md:coder"
   "$REPO_DIR/agents/cursor-reviewer-delegator.md:reviewer"
+  "$REPO_DIR/agents/codex-reviewer-delegator.md:codex_reviewer"
   "$REPO_DIR/commands/cursor-implement-plans.md:coder"
   "$REPO_DIR/commands/cursor-review.md:reviewer"
+  "$REPO_DIR/commands/codex-review.md:codex_reviewer"
   "$REPO_DIR/scripts/cc-delegate.sh:coder"
   "$REPO_DIR/scripts/cr-delegate.sh:reviewer"
+  "$REPO_DIR/scripts/cx-delegate.sh:codex_reviewer"
   "$REPO_DIR/tests/e2e-smoke.md:reviewer"
+  "$REPO_DIR/tests/e2e-smoke.md:codex_reviewer"
 )
 
 for entry in "${MARKER_TARGETS[@]}"; do
