@@ -1,5 +1,36 @@
 # Cursor Reviewer Effectiveness Log
 
+## 2026-07-29 — spec review, 1 round
+
+- **Run:** 2026-07-29 · target: spec · doc:
+  `docs/superpowers/specs/2026-07-29-codex-reviewer-design.md` · lenses: backend ·
+  session `7f57533e-0462-43b0-9c8e-98402b8f7bac`.
+- **Findings:** 2 Critical, 6 Important, 5 Minor, verdict "Approve with fixes."
+- **Triage outcome:** accepted both Critical findings and 5 of 6 Important findings
+  in full. Partial pushback on 1 Important finding: the reviewer called the
+  README-only "ask which reviewer" gate convention a contradiction with the
+  spec's own out-of-scope line ("changing the existing reviewer's behavior");
+  it isn't — this repo's original cursor-reviewer design already established
+  that superpowers-gate integration is doc-only convention, not skill/code
+  edits. Accepted the actionable half of the suggestion (a one-line
+  discoverability pointer added to both command files) without treating it as
+  a contradiction to resolve. All 5 Minor findings accepted as written.
+- **Reviewer quality:** both Critical findings were specific and
+  codebase-grounded — it read the actual installed `codex --help` surface (not
+  assumed) to catch the missing `-C/--cd` working-root spec, and it read
+  `scripts/sync-models.sh`'s real `regen_markers` function to catch that its
+  binary `if/else` would silently write the wrong label into a third role's
+  marker spans. No false positives among the Critical/Important findings. The
+  "contradiction" framing on the gate-convention finding was the one
+  overreach — a plausible-sounding claim that didn't hold up against what the
+  spec's own Scope section already said.
+- **Environment friction:** none. Preflight probe returned READY immediately;
+  the dispatched review completed in one round with a clean REVIEWED status
+  and a non-empty `session_id`.
+- **Recommendations:** none for the rubrics/dispatch prompt this round — the
+  finding quality suggests the existing `spec-review.md` + `lens-backend.md`
+  rubric combination is well-tuned for infra/plumbing specs like this one.
+
 ## 2026-07-18 — spec review, 4 rounds
 
 - **Run:** 2026-07-18 · target: spec · doc:
