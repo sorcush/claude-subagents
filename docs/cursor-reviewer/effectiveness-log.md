@@ -158,3 +158,43 @@
   check every mechanism elsewhere in the document against it. Both rounds' worst
   findings were internal contradictions between a promise and an implementation
   detail, not defects in either one alone.
+
+## 2026-08-22 — reviewer/coder pools implementation plan (round 3)
+
+- **Reviewer:** Codex / GPT-5.6 Sol, resuming session
+  `01a02ba1-f2e0-7dc1-9ae7-417d084ecd29` for the third time, now reviewing the
+  plan against the spec it had already shaped.
+- **Run:** 2026-08-22 · target `plan` · plan vs spec · plan-review rubric.
+- **Findings:** 4 Critical, 12 Important, 4 Minor. Verdict: **Needs revision**.
+- **Triage outcome:** 19 of 20 accepted. One rejected on the facts (below).
+- **The finding that justified the whole round.** The plan's copy-on-write
+  cloning did NOT deliver the isolation the spec promises. `cp -R` and `cp -Rc`
+  preserve symlinks rather than following them, so an absolute link inside a
+  copied `node_modules` still points at the main checkout. Verified directly:
+  planted such a link, wrote through it from the worktree, and the main-checkout
+  file changed to "PWNED". This is the **third consecutive round** in which the
+  same guarantee leaked by a different mechanism — link everything ignored, then
+  link a narrower list, then copy but keep the links inside.
+- **Tests that proved nothing.** The reviewer's sharpest structural point was
+  that several tests could not fail. The isolation test asserted
+  `find -type l` finds zero links, but its fixture contained no symlink. The
+  removal test created `untracked-user-file.txt` and then asserted removal
+  *succeeded* — baking in the destructive `--force` + `rm -rf` behavior as
+  correct. The probe test's only negative case was lowercase `"not ready"`, so it
+  could not catch `grep -q READY` accepting `NOTREADY`.
+- **Rejected, with evidence:** it called `out="$(cmd)"; [[ $? -eq 0 ]]` a Critical
+  correctness bug. It is not — bash sets `$?` from the command substitution;
+  verified with a function returning 7. Severity wrong, advice still worth taking,
+  so the explicit form was adopted anyway.
+- **Found independently, not by the reviewer:** the codex probe used
+  `grep -q '"type":"turn.failed"'` on raw output. My own identical grep misfired
+  on *this review's* output, because the reviewer's prose contained that string.
+  Same substring class as the READY bug; now parsed with `jq`.
+- **Environment friction:** none. Third resume with
+  `-c sandbox_mode="read-only"` applied by hand; full context retained, no writes.
+- **Recommendations:** (1) Add to `plan-review.md`: "for each test, name an input
+  that would make it fail. If you cannot, the test proves nothing." Three of this
+  round's best findings were unfailable tests, and no current rubric line asks for
+  that. (2) Add to `lens-backend.md`: "a stated guarantee needs a test that
+  attacks it, not prose that restates it." Three rounds, three leaks of the same
+  guarantee, each caught only after it was written down as safe.
