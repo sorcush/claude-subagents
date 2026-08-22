@@ -1,0 +1,6 @@
+{
+  "coders": [
+    { "key": "cursor-composer", "label": "Cursor Composer 2.5", "harness": "cursor", "model": "composer-2.5", "default": true },
+    { "key": "codex-luna",      "label": "Codex GPT-5.6 Luna",  "harness": "codex",  "model": "gpt-5.6-luna" }
+  ]
+}
