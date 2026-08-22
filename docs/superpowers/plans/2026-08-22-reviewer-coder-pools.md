@@ -698,8 +698,11 @@ for ok in "READY" "READY."; do
   check "reply '$ok' is accepted" "READY" "$(echo "$out" | jq -r '.status')"
 done
 
-# A progress event that merely mentions READY must not count as the answer.
-out=$(MOCK_STREAM=1 MOCK_RESULT="all done" bash "$SCRIPT" --role reviewer --key c-codex 2>/dev/null)
+# A progress event that merely mentions READY must not count as the answer. The
+# stream text is set explicitly: with the mock's default text this test would pass
+# for the wrong reason and could never catch the bug it exists for.
+out=$(MOCK_STREAM=1 MOCK_STREAM_TEXT="READY" MOCK_RESULT="all done" \
+      bash "$SCRIPT" --role reviewer --key c-codex 2>/dev/null)
 check "READY in a progress event does not pass" "FAILED" "$(echo "$out" | jq -r '.status')"
 
 # A CLI that fails outright is classified, and the real error is kept.
@@ -746,6 +749,27 @@ right after the `MOCK_LOG` line, and document it in each file's header comment:
 # MOCK_SLEEP=<secs> -> stall this long before answering, to exercise timeouts
 if [[ -n "${MOCK_SLEEP:-}" ]]; then sleep "$MOCK_SLEEP"; fi
 ```
+
+Also make the progress-event text controllable in BOTH files, so a test can put the
+word `READY` into a progress event and prove the probe ignores it. In
+`tests/mock-codex`, change the `MOCK_STREAM` event to use a variable:
+
+```bash
+# MOCK_STREAM_TEXT=<text> -> text of the progress event (default "exploring README.md")
+printf '{"type":"item.completed","item":{"id":"item_pre","type":"reasoning","text":"%s"}}\n' \
+  "${MOCK_STREAM_TEXT:-exploring README.md}"
+```
+
+In `tests/mock-cursor-agent`, change the `assistant` progress event the same way:
+
+```bash
+printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]},"session_id":"%s"}\n' \
+  "${MOCK_STREAM_TEXT:-reviewing}" "$session"
+```
+
+Without this, the "a progress event mentioning READY must not pass" test cannot fail:
+the default progress text contains no such word, so the test would pass for the wrong
+reason and could never catch the bug it exists for.
 
 Everything else in those two files stays as it is. The new tests rely on their existing
 `MOCK_RESULT`, `MOCK_SESSION`, `MOCK_STREAM`, `MOCK_FAIL_CLI` and `MOCK_LOG` behaviour,
@@ -834,7 +858,7 @@ harness_probe() {
   # shellcheck disable=SC2064
   trap "rm -f '$out'" RETURN
   run_with_timeout "${CSC_PROBE_TIMEOUT:-120}" \
-    "$CSC_CURSOR_BIN" -p --force --trust --mode ask --output-format json --model "$model" \
+    "$CSC_CURSOR_BIN" -p --force --trust --mode ask --output-format stream-json --model "$model" \
     "Reply with the single word READY." >"$out" 2>>"$ERR_FILE"
   rc=$?
   if [[ $rc -eq "$TIMEOUT_EXIT" ]]; then PROBE_REASON="timeout"; return 1; fi
@@ -1323,6 +1347,17 @@ has "ui lens included"        "UI_LENS_SENTINEL"       "$log"
 has "output format included"  "OUTPUT_FORMAT_SENTINEL" "$log"
 check "frontend lens absent"  "0" "$(grep -c -- 'FRONTEND_LENS_SENTINEL' "$log")"
 check "plan rubric absent"    "0" "$(grep -c -- 'PLAN_RUBRIC_SENTINEL' "$log")"
+
+# Order matters: target rubric, then lenses, then the output format. Presence alone
+# would pass even if they were assembled in the wrong order. MOCK_LOG records the
+# whole prompt as a single line, so compare character offsets within it.
+argline=$(grep -m1 'ARGS:' "$log")
+offset() { awk -v s="$argline" -v pat="$1" 'BEGIN { print index(s, pat) }'; }
+p_rubric=$(offset SPEC_RUBRIC_SENTINEL)
+p_lens=$(offset BACKEND_LENS_SENTINEL)
+p_fmt=$(offset OUTPUT_FORMAT_SENTINEL)
+check "rubric comes before the lens"        "1" "$([[ $p_rubric -gt 0 && $p_rubric -lt $p_lens ]] && echo 1 || echo 0)"
+check "lens comes before the output format" "1" "$([[ $p_lens   -gt 0 && $p_lens   -lt $p_fmt  ]] && echo 1 || echo 0)"
 rm -f "$log"
 
 log="$TMP/args.log"
