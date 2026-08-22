@@ -4,7 +4,7 @@
 
 **Goal:** Replace the plugin's three hard-coded model roles with two configurable pools and a pluggable harness layer, so changing a model is a one-line JSON edit and adding a tool is one new file.
 
-**Architecture:** Two JSON pool files describe the available reviewers and coders. A shared library reads and validates them. A harness file per tool (`cursor`, `codex`, `claude`) hides how that tool is invoked behind three shell functions. Two generic delegate scripts replace three tool-specific ones. The orchestrator builds its menu at run time from the pool, so no command or agent file ever names a model. The coder works in a git worktree whose dependency folders are copy-on-write clones, so it cannot write into the main checkout.
+**Architecture:** Two JSON pool files describe the available reviewers and coders. A shared library reads and validates them. A harness file per tool (`cursor`, `codex`, `claude`) hides how that tool is invoked behind three shell functions. Two generic delegate scripts replace three tool-specific ones. The orchestrator builds its menu at run time from the pool, so no command or agent file ever names a model. The coder works in a git worktree whose dependency folders are isolated copies with escaping symlinks stripped, so it cannot write into the main checkout.
 
 **Tech Stack:** Bash 5, `jq`, `git`, and the `cursor-agent`, `codex` and `claude` CLIs. Tests are plain bash scripts using fake CLI programs placed on `PATH`, following the existing `tests/mock-*` pattern.
 
@@ -82,7 +82,21 @@ These apply to every task. They are copied from the spec and are not repeated in
   - `pool_file_for <role>` — echoes the default pool path for `reviewer`/`reviewers` or `coder`/`coders`.
   - Env overrides `CSC_REVIEWERS_JSON` and `CSC_CODERS_JSON` for tests.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Create the placeholder harness files first**
+
+The pool validator requires `scripts/harness/<name>.sh` to exist, so these must be
+there before the test runs. Creating them inside the test would mean the test mutates
+the repository, and the red/green boundary would no longer be "`pool.sh` is missing".
+Task 3 fills them in.
+
+```bash
+mkdir -p scripts/harness scripts/lib
+for h in cursor codex claude; do
+  printf '#!/usr/bin/env bash\n# Filled in by Task 3.\n' > "scripts/harness/$h.sh"
+done
+```
+
+- [ ] **Step 2: Write the failing test**
 
 Create `tests/test-pool.sh`:
 
@@ -106,9 +120,6 @@ check() {  # check <description> <expected> <actual>
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-
-# A harness dir the fixtures can point at, so "harness file must exist" passes.
-mkdir -p "$HERE/../scripts/harness"
 
 write() {  # write <path> <json>
   printf '%s\n' "$2" > "$TMP/$1"
@@ -182,12 +193,12 @@ echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 3: Run the test to verify it fails**
 
 Run: `bash tests/test-pool.sh`
 Expected: FAIL — `scripts/pool.sh` does not exist, so every case errors.
 
-- [ ] **Step 3: Create the two pool files**
+- [ ] **Step 4: Create the two pool files**
 
 `.claude-plugin/reviewers.json`:
 
@@ -213,7 +224,7 @@ Expected: FAIL — `scripts/pool.sh` does not exist, so every case errors.
 }
 ```
 
-- [ ] **Step 4: Write `scripts/lib/pool.sh`**
+- [ ] **Step 5: Write `scripts/lib/pool.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -340,7 +351,7 @@ pool_get() {
 }
 ```
 
-- [ ] **Step 5: Write `scripts/pool.sh`**
+- [ ] **Step 6: Write `scripts/pool.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -376,19 +387,12 @@ case "$cmd" in
 esac
 ```
 
-- [ ] **Step 6: Create placeholder harness files so validation can pass**
-
-The pool validator requires `scripts/harness/<name>.sh` to exist. Task 3 fills these in; for now create empty files so Task 1's tests can pass.
+- [ ] **Step 7: Run the test to verify it passes**
 
 ```bash
-mkdir -p scripts/harness
-for h in cursor codex claude; do
-  printf '#!/usr/bin/env bash\n# Filled in by Task 3.\n' > "scripts/harness/$h.sh"
-done
 chmod +x scripts/pool.sh
 ```
 
-- [ ] **Step 7: Run the test to verify it passes**
 
 Run: `bash tests/test-pool.sh`
 Expected: PASS, `FAIL=0`.
@@ -411,7 +415,13 @@ git commit -m "feat: reviewer and coder pool files with a validating library"
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `run_with_timeout <seconds> <command...>` — runs the command in its own process group, returns the command's exit code, and sets `TIMEOUT_HIT` to `1` if it had to kill it, `0` otherwise.
+- Produces: `run_with_timeout <seconds> <command...>` — runs the command in its own process group and returns the command's exit code, **except that a timed-out command returns `124`** (the same convention GNU `timeout` uses). It also sets `TIMEOUT_HIT`.
+
+  **Why an exit code and not just the variable.** `harness_run` calls this inside
+  `( cd "$dir" && ... )`. A variable set in that subshell is discarded when it exits,
+  so `TIMEOUT_HIT` alone cannot tell the caller a timeout happened. An exit status
+  crosses a subshell boundary; a variable does not. `TIMEOUT_HIT` is kept for callers
+  that invoke the helper directly, such as `harness_probe`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -453,9 +463,27 @@ start=$SECONDS
 run_with_timeout 1 sleep 30
 rc=$?
 elapsed=$(( SECONDS - start ))
-check "slow command is terminated"        "1" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
-check "slow command sets TIMEOUT_HIT"     "1" "$TIMEOUT_HIT"
-check "returns promptly, not after 30s"   "1" "$([[ $elapsed -lt 15 ]] && echo 1 || echo 0)"
+check "slow command returns 124"          "124" "$rc"
+check "slow command sets TIMEOUT_HIT"     "1"   "$TIMEOUT_HIT"
+check "returns promptly, not after 30s"   "1"   "$([[ $elapsed -lt 15 ]] && echo 1 || echo 0)"
+
+# 124 must survive a subshell, because harness_run wraps the call in ( cd ... ).
+# A variable would not survive, which is exactly why the status carries the signal.
+( cd / && run_with_timeout 1 sleep 30 )
+check "124 crosses a subshell boundary" "124" "$?"
+
+# A command that genuinely exits 124 on its own must not be mistaken for a timeout,
+# so the helper reports TIMEOUT_HIT=0 there and the caller can tell them apart.
+run_with_timeout 10 bash -c "exit 124"
+check "a real 124 is passed through" "124" "$?"
+check "a real 124 is not a timeout"  "0"   "$TIMEOUT_HIT"
+
+# --- the caller's own traps are restored, not wiped ---
+trap 'echo CALLER_TRAP' INT
+run_with_timeout 10 true
+check "caller INT trap survives" "1" \
+  "$([[ "$(trap -p INT)" == *CALLER_TRAP* ]] && echo 1 || echo 0)"
+trap - INT
 
 # --- the whole process GROUP dies, not just the direct child ---
 # The parent script spawns a grandchild and records its pid, then sleeps.
@@ -470,10 +498,18 @@ SPAWN
 chmod +x "$TMP/spawner.sh"
 
 run_with_timeout 1 "$TMP/spawner.sh" "$TMP/grandchild.pid"
-sleep 1
 gc=$(cat "$TMP/grandchild.pid" 2>/dev/null || echo "")
 check "grandchild pid was recorded" "1" "$([[ -n "$gc" ]] && echo 1 || echo 0)"
-check "grandchild is killed too"    "1" "$(kill -0 "$gc" 2>/dev/null && echo 0 || echo 1)"
+
+# `kill -0` alone is not proof: it also succeeds for a zombie that has exited but
+# not been reaped. Poll for the process to disappear, with a bound so a real
+# failure still fails instead of hanging.
+gone=0
+for _ in $(seq 1 50); do
+  if ! ps -p "$gc" -o stat= 2>/dev/null | grep -qv '^[[:space:]]*Z'; then gone=1; break; fi
+  sleep 0.2
+done
+check "grandchild is really gone, not just unsignalable" "1" "$gone"
 
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"
@@ -499,16 +535,26 @@ Expected: FAIL — `scripts/lib/timeout.sh` does not exist, so `source` errors.
 
 TIMEOUT_HIT=0
 
+TIMEOUT_EXIT=124   # same convention as GNU `timeout`
+
 # run_with_timeout <seconds> <command...>
-# Returns the command's exit status. Sets TIMEOUT_HIT=1 if it had to kill it.
+# Returns the command's exit status, or 124 if it had to be killed.
+# Also sets TIMEOUT_HIT, for callers that are not behind a subshell.
 run_with_timeout() {
   local secs="$1"; shift
   local flag pid watcher rc
+  local old_int old_term
   flag="$(mktemp)"
   TIMEOUT_HIT=0
 
-  # `set -m` gives the background job its own process group, so a negative
-  # pid in `kill` reaches the command and everything it spawned.
+  # Save the caller's traps so they can be restored. `trap -` would discard
+  # them, silently disarming whatever the calling script had installed.
+  old_int="$(trap -p INT)"
+  old_term="$(trap -p TERM)"
+
+  # `set -m` gives the background job its own process group, so a negative pid
+  # in `kill` reaches the command and everything it spawned. Without this, a
+  # timed-out CLI would keep running and could still be editing files.
   set -m
   "$@" &
   pid=$!
@@ -516,26 +562,41 @@ run_with_timeout() {
 
   {
     sleep "$secs"
+    # Write the flag BEFORE signalling. If we signalled first, the command
+    # could be reaped and its pid reused by an unrelated process before we
+    # recorded anything, and we would have no way to tell the two apart.
     if kill -0 "$pid" 2>/dev/null; then
       echo 1 > "$flag"
       kill -TERM -"$pid" 2>/dev/null
       sleep 5
-      kill -KILL -"$pid" 2>/dev/null
+      # Re-check: the TERM may already have worked, and by now this pid could
+      # belong to something else entirely.
+      if [[ -s "$flag" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill -KILL -"$pid" 2>/dev/null
+      fi
     fi
   } &
   watcher=$!
 
-  # If the caller is interrupted, take the whole group down rather than
-  # orphaning it.
+  # While the child runs, an interrupt should take the whole group down rather
+  # than orphaning it.
   trap 'kill -KILL -'"$pid"' 2>/dev/null; kill '"$watcher"' 2>/dev/null' INT TERM
 
   wait "$pid"; rc=$?
 
-  trap - INT TERM
+  # Stop the watcher first, so it cannot signal a pid that has now been reaped.
   kill "$watcher" 2>/dev/null
   wait "$watcher" 2>/dev/null
 
-  [[ -s "$flag" ]] && TIMEOUT_HIT=1
+  # Restore exactly what the caller had, including "no trap at all".
+  if [[ -n "$old_int" ]];  then eval "$old_int";  else trap - INT;  fi
+  if [[ -n "$old_term" ]]; then eval "$old_term"; else trap - TERM; fi
+
+  if [[ -s "$flag" ]]; then
+    TIMEOUT_HIT=1
+    rm -f "$flag"
+    return "$TIMEOUT_EXIT"
+  fi
   rm -f "$flag"
   return "$rc"
 }
@@ -566,7 +627,7 @@ git commit -m "feat: portable bounded execution helper with process-group cleanu
 - Consumes: `run_with_timeout` (Task 2); `pool_load`, `pool_file_for`, `pool_get` (Task 1).
 - Produces, in every harness file:
   - `harness_probe <model>` — returns 0 when the tool replies `READY`. Sets `PROBE_REASON` to one of `auth`, `trust`, `not-installed`, `bad-model`, `timeout`, `other`. Writes the tool's error to stderr.
-  - `harness_run <mode> <model> <dir> <prompt> <session>` — `mode` is `edit` or `read-only`; `dir` is absolute. Sets `SESSION_ID` and `RESULT`, returns 0 on success. **Must be called as a plain statement.**
+  - `harness_run <mode> <model> <dir> <prompt> <session>` — `mode` is `edit` or `read-only`; `dir` is absolute. Sets `SESSION_ID` and `RESULT`, returns 0 on success. **Must be called as a plain statement.** It **clears `SESSION_ID` and `RESULT` first**, so a failed resume cannot leave the previous call's values looking like a fresh success. On a timeout it sets `HARNESS_TIMED_OUT=1` and returns 1; callers set that flag to 0 before each call.
   - `harness_render <json-line>` — one progress line to stderr.
   - Each harness reads its binary from an env override: `CSC_CURSOR_BIN`, `CSC_CODEX_BIN`, `CSC_CLAUDE_BIN`.
 - `scripts/probe.sh --role <reviewer|coder> --key <k>` prints
@@ -623,9 +684,23 @@ MOCK_LOG="$log" MOCK_RESULT=READY bash "$SCRIPT" --role reviewer --key c-codex >
 check "probe passes the pool's model" "1" "$(grep -c -- 'm-codex' "$log")"
 rm -f "$log"
 
-# A reply that is not READY is a failure, not a pass.
-out=$(MOCK_RESULT="not ready" bash "$SCRIPT" --role reviewer --key c-codex 2>/dev/null)
-check "non-READY reply fails" "FAILED" "$(echo "$out" | jq -r '.status')"
+# A reply that is not exactly READY is a failure. These cases exist because a
+# substring test would wrongly accept every one of them.
+for bad in "not ready" "NOTREADY" "READY now" "I am READY to begin" "ALREADY"; do
+  out=$(MOCK_RESULT="$bad" bash "$SCRIPT" --role reviewer --key c-codex 2>/dev/null)
+  check "reply '$bad' is rejected" "FAILED" "$(echo "$out" | jq -r '.status')"
+done
+
+# Trailing punctuation and surrounding whitespace are tolerated; the word must
+# still stand alone.
+for ok in "READY" "READY."; do
+  out=$(MOCK_RESULT="$ok" bash "$SCRIPT" --role reviewer --key c-codex 2>/dev/null)
+  check "reply '$ok' is accepted" "READY" "$(echo "$out" | jq -r '.status')"
+done
+
+# A progress event that merely mentions READY must not count as the answer.
+out=$(MOCK_STREAM=1 MOCK_RESULT="all done" bash "$SCRIPT" --role reviewer --key c-codex 2>/dev/null)
+check "READY in a progress event does not pass" "FAILED" "$(echo "$out" | jq -r '.status')"
 
 # A CLI that fails outright is classified, and the real error is kept.
 out=$(MOCK_FAIL_CLI=1 MOCK_STDERR="Authentication required" \
@@ -661,7 +736,22 @@ echo "PASS=$PASS FAIL=$FAIL"
 Run: `bash tests/test-probe.sh`
 Expected: FAIL — `scripts/probe.sh` and `tests/mock-claude` do not exist.
 
-- [ ] **Step 3: Write `tests/mock-claude`**
+- [ ] **Step 3: Add the new mock controls to the two existing mocks**
+
+`tests/mock-cursor-agent` and `tests/mock-codex` predate the harness layer and cannot
+simulate a slow tool, so the timeout paths would be untestable. Add this to BOTH,
+right after the `MOCK_LOG` line, and document it in each file's header comment:
+
+```bash
+# MOCK_SLEEP=<secs> -> stall this long before answering, to exercise timeouts
+if [[ -n "${MOCK_SLEEP:-}" ]]; then sleep "$MOCK_SLEEP"; fi
+```
+
+Everything else in those two files stays as it is. The new tests rely on their existing
+`MOCK_RESULT`, `MOCK_SESSION`, `MOCK_STREAM`, `MOCK_FAIL_CLI` and `MOCK_LOG` behaviour,
+so do not change those.
+
+- [ ] **Step 4: Write `tests/mock-claude`**
 
 ```bash
 #!/usr/bin/env bash
@@ -675,11 +765,13 @@ Expected: FAIL — `scripts/probe.sh` and `tests/mock-claude` do not exist.
 #   MOCK_SESSION=<id>   -> session_id to emit (default claude-mock-1)
 #   MOCK_RESULT=<text>  -> result text to emit (default "done"; empty stays empty)
 #   MOCK_STREAM=1       -> emit progress events before the terminal result line
+#   MOCK_SLEEP=<secs>   -> stall this long before answering, to exercise timeouts
 #   MOCK_LOG=<path>     -> append "ARGS: $*" (all argv, incl. the prompt) to this file
 set -euo pipefail
 
 if [[ -n "${MOCK_LOG:-}" ]]; then echo "ARGS: $*" >> "$MOCK_LOG"; fi
 if [[ -n "${MOCK_STDERR:-}" ]]; then echo "$MOCK_STDERR" >&2; fi
+if [[ -n "${MOCK_SLEEP:-}" ]]; then sleep "$MOCK_SLEEP"; fi
 if [[ "${MOCK_FAIL_CLI:-0}" == "1" ]]; then
   echo "claude: simulated CLI failure" >&2
   exit 1
@@ -705,7 +797,7 @@ exit 0
 
 Then: `chmod +x tests/mock-claude`
 
-- [ ] **Step 4: Write `scripts/harness/cursor.sh`**
+- [ ] **Step 5: Write `scripts/harness/cursor.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -739,19 +831,24 @@ harness_probe() {
     PROBE_REASON="not-installed"; echo "cursor-agent not found: $CSC_CURSOR_BIN" >&2; return 1
   fi
   out=$(mktemp)
+  # shellcheck disable=SC2064
+  trap "rm -f '$out'" RETURN
   run_with_timeout "${CSC_PROBE_TIMEOUT:-120}" \
-    "$CSC_CURSOR_BIN" -p --force --trust --mode ask --model "$model" \
+    "$CSC_CURSOR_BIN" -p --force --trust --mode ask --output-format json --model "$model" \
     "Reply with the single word READY." >"$out" 2>>"$ERR_FILE"
   rc=$?
-  if [[ "$TIMEOUT_HIT" == "1" ]]; then PROBE_REASON="timeout"; rm -f "$out"; return 1; fi
+  if [[ $rc -eq "$TIMEOUT_EXIT" ]]; then PROBE_REASON="timeout"; return 1; fi
   if [[ $rc -ne 0 ]]; then
     PROBE_REASON="$(harness_classify "$(cat "$ERR_FILE" 2>/dev/null)")"
-    rm -f "$out"; return 1
+    return 1
   fi
-  if ! grep -q "READY" "$out"; then
-    PROBE_REASON="other"; cat "$out" >> "$ERR_FILE"; rm -f "$out"; return 1
+  # Compare the tool's actual answer, not the raw stream.
+  local answer
+  answer=$(jq -r 'select(.type=="result") | .result // ""' "$out" 2>/dev/null | tail -1)
+  if ! harness_is_ready "$answer"; then
+    PROBE_REASON="other"; cat "$out" >> "$ERR_FILE"; return 1
   fi
-  rm -f "$out"; return 0
+  return 0
 }
 
 # harness_run <mode> <model> <dir> <prompt> <session>
@@ -761,6 +858,10 @@ harness_run() {
   local outfile rc line result_line="" is_err sub
   : > "$ERR_FILE"
   outfile=$(mktemp)
+  # Reset before every call. Without this, a failed resume could leave the
+  # PREVIOUS call's session id in place and look like a success.
+  SESSION_ID=""
+  RESULT=""
 
   local -a cmd=("$CSC_CURSOR_BIN" -p --force --trust --approve-mcps
                 --output-format stream-json --model "$model")
@@ -783,6 +884,13 @@ harness_run() {
   done < "$outfile"
   rm -f "$outfile"
 
+  # 124 is how run_with_timeout reports a timeout across the subshell above.
+  # A variable set inside that subshell would have been discarded.
+  if [[ $rc -eq "$TIMEOUT_EXIT" ]]; then
+    echo "timed out after ${CSC_RUN_TIMEOUT:-1800}s" >> "$ERR_FILE"
+    HARNESS_TIMED_OUT=1
+    return 1
+  fi
   [[ $rc -ne 0 ]] && return 1
   [[ -z "$result_line" ]] && return 1
   jq -e . <<<"$result_line" >/dev/null 2>&1 || return 1
@@ -800,7 +908,7 @@ harness_run() {
 }
 ```
 
-- [ ] **Step 5: Write `scripts/harness/codex.sh`**
+- [ ] **Step 6: Write `scripts/harness/codex.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -826,19 +934,27 @@ harness_probe() {
     PROBE_REASON="not-installed"; echo "codex not found: $CSC_CODEX_BIN" >&2; return 1
   fi
   out=$(mktemp)
+  # shellcheck disable=SC2064
+  trap "rm -f '$out'" RETURN
   run_with_timeout "${CSC_PROBE_TIMEOUT:-120}" \
     "$CSC_CODEX_BIN" exec --json -s read-only -m "$model" \
     "Reply with the single word READY." >"$out" 2>>"$ERR_FILE" </dev/null
   rc=$?
-  if [[ "$TIMEOUT_HIT" == "1" ]]; then PROBE_REASON="timeout"; rm -f "$out"; return 1; fi
-  if [[ $rc -ne 0 ]] || grep -q '"type":"turn.failed"' "$out"; then
+  if [[ $rc -eq "$TIMEOUT_EXIT" ]]; then PROBE_REASON="timeout"; return 1; fi
+  # Parse for a real turn.failed EVENT. A substring grep would also match the
+  # phrase appearing inside the model's own answer text.
+  local failed
+  failed=$(jq -rs '[.[] | select(.type=="turn.failed")] | length' "$out" 2>/dev/null || echo 0)
+  if [[ $rc -ne 0 ]] || [[ "${failed:-0}" != "0" ]]; then
     PROBE_REASON="$(harness_classify "$(cat "$ERR_FILE" 2>/dev/null; cat "$out")")"
-    cat "$out" >> "$ERR_FILE"; rm -f "$out"; return 1
+    cat "$out" >> "$ERR_FILE"; return 1
   fi
-  if ! grep -q "READY" "$out"; then
-    PROBE_REASON="other"; cat "$out" >> "$ERR_FILE"; rm -f "$out"; return 1
+  local answer
+  answer=$(jq -r 'select(.type=="item.completed") | select(.item.type=="agent_message") | .item.text' "$out" 2>/dev/null | tail -1)
+  if ! harness_is_ready "$answer"; then
+    PROBE_REASON="other"; cat "$out" >> "$ERR_FILE"; return 1
   fi
-  rm -f "$out"; return 0
+  return 0
 }
 
 harness_run() {
@@ -890,13 +1006,20 @@ harness_run() {
   done < "$outfile"
   rm -f "$outfile"
 
+  # 124 is how run_with_timeout reports a timeout across the subshell above.
+  # A variable set inside that subshell would have been discarded.
+  if [[ $rc -eq "$TIMEOUT_EXIT" ]]; then
+    echo "timed out after ${CSC_RUN_TIMEOUT:-1800}s" >> "$ERR_FILE"
+    HARNESS_TIMED_OUT=1
+    return 1
+  fi
   if [[ -n "$turn_failed" ]]; then echo "$fail_msg" > "$ERR_FILE"; return 1; fi
   [[ $rc -ne 0 ]] && return 1
   return 0
 }
 ```
 
-- [ ] **Step 6: Write `scripts/harness/claude.sh`**
+- [ ] **Step 7: Write `scripts/harness/claude.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -922,20 +1045,24 @@ harness_probe() {
     PROBE_REASON="not-installed"; echo "claude not found: $CSC_CLAUDE_BIN" >&2; return 1
   fi
   out=$(mktemp)
+  # shellcheck disable=SC2064
+  trap "rm -f '$out'" RETURN
   run_with_timeout "${CSC_PROBE_TIMEOUT:-120}" \
     "$CSC_CLAUDE_BIN" -p --model "$model" --output-format stream-json \
     --allowedTools "Read" --permission-mode dontAsk \
     "Reply with the single word READY." >"$out" 2>>"$ERR_FILE" </dev/null
   rc=$?
-  if [[ "$TIMEOUT_HIT" == "1" ]]; then PROBE_REASON="timeout"; rm -f "$out"; return 1; fi
+  if [[ $rc -eq "$TIMEOUT_EXIT" ]]; then PROBE_REASON="timeout"; return 1; fi
   if [[ $rc -ne 0 ]]; then
     PROBE_REASON="$(harness_classify "$(cat "$ERR_FILE" 2>/dev/null)")"
-    rm -f "$out"; return 1
+    return 1
   fi
-  if ! grep -q "READY" "$out"; then
-    PROBE_REASON="other"; cat "$out" >> "$ERR_FILE"; rm -f "$out"; return 1
+  local answer
+  answer=$(jq -r 'select(.type=="result") | .result // ""' "$out" 2>/dev/null | tail -1)
+  if ! harness_is_ready "$answer"; then
+    PROBE_REASON="other"; cat "$out" >> "$ERR_FILE"; return 1
   fi
-  rm -f "$out"; return 0
+  return 0
 }
 
 harness_run() {
@@ -943,6 +1070,9 @@ harness_run() {
   local outfile rc line result_line="" is_err sub
   : > "$ERR_FILE"
   outfile=$(mktemp)
+  # Reset before every call, for the same reason as the cursor harness.
+  SESSION_ID=""
+  RESULT=""
 
   local -a cmd=("$CSC_CLAUDE_BIN" -p --model "$model" --output-format stream-json)
   if [[ "$mode" == "read-only" ]]; then
@@ -968,6 +1098,13 @@ harness_run() {
   done < "$outfile"
   rm -f "$outfile"
 
+  # 124 is how run_with_timeout reports a timeout across the subshell above.
+  # A variable set inside that subshell would have been discarded.
+  if [[ $rc -eq "$TIMEOUT_EXIT" ]]; then
+    echo "timed out after ${CSC_RUN_TIMEOUT:-1800}s" >> "$ERR_FILE"
+    HARNESS_TIMED_OUT=1
+    return 1
+  fi
   [[ $rc -ne 0 ]] && return 1
   [[ -z "$result_line" ]] && return 1
   jq -e . <<<"$result_line" >/dev/null 2>&1 || return 1
@@ -985,7 +1122,7 @@ harness_run() {
 }
 ```
 
-- [ ] **Step 7: Write `scripts/lib/harness.sh` (shared loader and classifier)**
+- [ ] **Step 8: Write `scripts/lib/harness.sh` (shared loader and classifier)**
 
 ```bash
 #!/usr/bin/env bash
@@ -1010,6 +1147,15 @@ harness_load() {
   done
 }
 
+# harness_is_ready <text> -> 0 only when the reply is exactly the word READY.
+# A substring test would accept "NOTREADY", "READY later", or a progress event that
+# merely mentions the word while the real answer was something else.
+harness_is_ready() {
+  local s="$1"
+  s="$(printf '%s' "$s" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/[.!]*$//')"
+  [[ "$s" == "READY" ]]
+}
+
 # harness_classify <error-text> -> one of auth|trust|not-installed|bad-model|other
 # Used so a probe failure gives the right advice instead of always saying "log in".
 harness_classify() {
@@ -1024,7 +1170,7 @@ harness_classify() {
 }
 ```
 
-- [ ] **Step 8: Write `scripts/probe.sh`**
+- [ ] **Step 9: Write `scripts/probe.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -1077,12 +1223,12 @@ exit 1
 
 Then: `chmod +x scripts/probe.sh`
 
-- [ ] **Step 9: Run the test to verify it passes**
+- [ ] **Step 10: Run the test to verify it passes**
 
 Run: `bash tests/test-probe.sh`
 Expected: PASS, `FAIL=0`.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add scripts/harness scripts/lib/harness.sh scripts/probe.sh \
@@ -1464,7 +1610,7 @@ for k in c-cursor c-codex c-claude; do
   check "$k echoes coder key"    "$k"     "$(echo "$out" | jq -r '.coder')"
   check "$k verified true"       "true"   "$(echo "$out" | jq -r '.verified')"
   check "$k zero attempts"       "0"      "$(echo "$out" | jq -r '.attempts')"
-  check "$k has commit_id field" "true"   "$(echo "$out" | jq 'has("commit_id")')"
+  check "$k commit_id is empty"   ""       "$(echo "$out" | jq -r '.commit_id')"
   check "$k emits one JSON line" "1"      "$(echo "$out" | wc -l | tr -d ' ')"
 done
 
@@ -1530,6 +1676,17 @@ check "--cwd outside a git repo exits 2" "2" "$?"
 run --coder nosuch --verify-cmd "true" >/dev/null 2>&1
 check "unknown coder exits 2" "2" "$?"
 
+for bad in "-1" "" "abc" "3+3"; do
+  run --coder c-codex --verify-cmd "true" --max-retries "$bad" >/dev/null 2>&1
+  check "--max-retries '$bad' exits 2" "2" "$?"
+done
+
+# --- a timeout is reported as such, not as a generic failure ---
+out=$(CSC_RUN_TIMEOUT=1 MOCK_SLEEP=5 run --coder c-codex --verify-cmd "true" 2>/dev/null)
+check "timeout is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+check "timeout says so in the output" "1" \
+  "$([[ "$(echo "$out" | jq -r '.verify_output')" == *timed\ out* ]] && echo 1 || echo 0)"
+
 rm -rf "$WT"
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"
@@ -1584,6 +1741,10 @@ done
   || { echo "error: --verify-cmd is required (use \"\" for no verification)" >&2; usage; exit 2; }
 [[ -n "$CWD" && -d "$CWD" ]] \
   || { echo "error: --cwd missing or not a directory" >&2; usage; exit 2; }
+# Unvalidated, a value like "-1" or "3+x" reaches an arithmetic comparison and
+# either loops forever or blows up with a syntax error.
+[[ "$MAX_RETRIES" =~ ^[0-9]+$ ]] \
+  || { echo "error: --max-retries must be a non-negative integer, got '$MAX_RETRIES'" >&2; exit 2; }
 
 # Resolve to an absolute path and require a real git worktree. Everything below
 # runs here: the task, every retry, the verify command, and every git call.
@@ -1616,12 +1777,25 @@ changed_flag() {
 
 # Run the verify command INSIDE the worktree. The old cc-delegate.sh ran this
 # in the caller's directory, which would test the wrong tree entirely.
+#
+# The status is captured into VERIFY_RC and the output into VERIFY_OUT, rather
+# than returned through a command substitution. `out=$(cmd); [[ $? -eq 0 ]]` does
+# work in bash, but it breaks the moment anyone inserts a line between the two,
+# and misreading a failed verification as a pass is the worst bug this script
+# could have.
+VERIFY_RC=0
+VERIFY_OUT=""
 run_verify() {
-  ( cd "$CWD" && eval "$VERIFY_CMD" ) 2>&1
+  local f; f=$(mktemp)
+  ( cd "$CWD" && eval "$VERIFY_CMD" ) >"$f" 2>&1
+  VERIFY_RC=$?
+  VERIFY_OUT="$(cat "$f")"
+  rm -f "$f"
 }
 
 PROMPT="Read the file $TASK_FILE and implement the task it describes. Make all necessary code edits."
 
+HARNESS_TIMED_OUT=0
 if ! harness_run "edit" "$ENTRY_MODEL" "$CWD" "$PROMPT" "$SESSION"; then
   emit BLOCKED "$SESSION_ID" 0 false false "" "coder invocation failed: $(cat "$ERR_FILE" 2>/dev/null)"
   exit 1
@@ -1639,9 +1813,9 @@ if [[ -z "$VERIFY_CMD" ]]; then
 fi
 
 attempts=0
-verify_out="$(run_verify)"
-if [[ $? -eq 0 ]]; then
-  emit DONE "$SESSION_ID" "$attempts" true "$(changed_flag)" "$RESULT" "$verify_out"
+run_verify
+if [[ "$VERIFY_RC" -eq 0 ]]; then
+  emit DONE "$SESSION_ID" "$attempts" true "$(changed_flag)" "$RESULT" "$VERIFY_OUT"
   exit 0
 fi
 
@@ -1649,22 +1823,31 @@ while [[ $attempts -lt $MAX_RETRIES ]]; do
   attempts=$((attempts+1))
   fix_prompt="The verification command failed with this output:
 
-$verify_out
+$VERIFY_OUT
 
 Fix the code so the verification passes. Make all necessary edits."
-  if ! harness_run "edit" "$ENTRY_MODEL" "$CWD" "$fix_prompt" "$SESSION_ID"; then
-    emit BLOCKED "$SESSION_ID" "$attempts" false "$(changed_flag)" "$RESULT" \
+  prev_session="$SESSION_ID"
+  HARNESS_TIMED_OUT=0
+  if ! harness_run "edit" "$ENTRY_MODEL" "$CWD" "$fix_prompt" "$prev_session"; then
+    emit BLOCKED "$prev_session" "$attempts" false "$(changed_flag)" "$RESULT" \
       "coder failed during fix attempt $attempts: $(cat "$ERR_FILE" 2>/dev/null)"
     exit 1
   fi
-  verify_out="$(run_verify)"
-  if [[ $? -eq 0 ]]; then
-    emit DONE "$SESSION_ID" "$attempts" true "$(changed_flag)" "$RESULT" "$verify_out"
+  # A resumed call must come back with a real session id too. harness_run clears
+  # it first, so an empty value here means the resume did not really happen.
+  if [[ -z "$SESSION_ID" ]]; then
+    emit BLOCKED "$prev_session" "$attempts" false "$(changed_flag)" "$RESULT" \
+      "coder returned no session id on fix attempt $attempts"
+    exit 1
+  fi
+  run_verify
+  if [[ "$VERIFY_RC" -eq 0 ]]; then
+    emit DONE "$SESSION_ID" "$attempts" true "$(changed_flag)" "$RESULT" "$VERIFY_OUT"
     exit 0
   fi
 done
 
-emit BLOCKED "$SESSION_ID" "$attempts" false "$(changed_flag)" "$RESULT" "$verify_out"
+emit BLOCKED "$SESSION_ID" "$attempts" false "$(changed_flag)" "$RESULT" "$VERIFY_OUT"
 exit 1
 ```
 
@@ -1831,10 +2014,33 @@ printf 'node_modules/\n' > "$r/.gitignore"
 git -C "$r" add -A && git -C "$r" commit -q -m ignore
 mkdir -p "$r/node_modules" && echo lib > "$r/node_modules/x.js"
 out=$(cd "$r" && bash "$SCRIPT" prepare 2>/dev/null); wt=$(echo "$out" | jq -r '.worktree')
-echo keepme > "$wt/untracked-user-file.txt"
 out=$(cd "$r" && bash "$SCRIPT" remove 2>/dev/null)
 check "removes despite copied deps" "REMOVED" "$(echo "$out" | jq -r '.status')"
 check "main checkout node_modules survives" "1" "$([[ -f "$r/node_modules/x.js" ]] && echo 1 || echo 0)"
+
+# remove must NEVER delete a file the user created in the worktree. An earlier
+# draft used `git worktree remove --force`, falling back to `rm -rf`, which
+# destroyed exactly this file while still reporting REMOVED.
+r=$(new_repo r-user-file)
+out=$(cd "$r" && bash "$SCRIPT" prepare 2>/dev/null); wt=$(echo "$out" | jq -r '.worktree')
+echo keepme > "$wt/untracked-user-file.txt"
+out=$(cd "$r" && bash "$SCRIPT" remove 2>/dev/null); rc=$?
+check "refuses rather than deleting a user file" "REFUSED" "$(echo "$out" | jq -r '.status')"
+check "refusal exits non-zero"                   "1"        "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+check "the user's file still exists"             "keepme"   "$(cat "$wt/untracked-user-file.txt" 2>/dev/null)"
+check "the worktree was not destroyed"           "1"        "$([[ -d "$wt" ]] && echo 1 || echo 0)"
+
+# Reuse must not lose the record of what the first prepare copied.
+r=$(new_repo r-manifest)
+printf 'node_modules/\n' > "$r/.gitignore"
+git -C "$r" add -A && git -C "$r" commit -q -m ignore
+mkdir -p "$r/node_modules" && echo lib > "$r/node_modules/x.js"
+out=$(cd "$r" && bash "$SCRIPT" prepare 2>/dev/null); wt=$(echo "$out" | jq -r '.worktree')
+out=$(cd "$r" && bash "$SCRIPT" prepare 2>/dev/null)
+check "reuse still reports the copied folder" "1" \
+  "$(echo "$out" | jq -r '.copied|index("node_modules")|if . == null then 0 else 1 end')"
+out=$(cd "$r" && bash "$SCRIPT" remove 2>/dev/null)
+check "remove works after a reuse" "REMOVED" "$(echo "$out" | jq -r '.status')"
 
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"
@@ -1877,18 +2083,47 @@ echo hi > "$r/README.md"
 git -C "$r" add -A && git -C "$r" commit -q -m init
 git -C "$r" checkout -q -b feature/iso
 
-mkdir -p "$r/node_modules/pkg"
+mkdir -p "$r/node_modules/pkg" "$r/node_modules/.bin" "$r/secret"
 echo "ORIGINAL" > "$r/node_modules/pkg/index.js"
+echo "TOPSECRET" > "$r/secret/key.txt"
+
+# Three symlink fixtures. Without these the test proves nothing: `cp -R` and
+# `cp -Rc` both PRESERVE symlinks rather than following them, so a copied
+# dependency tree can still contain a door back into the main checkout.
+#   1. absolute link out of the repo   -> must be removed
+#   2. relative link climbing out      -> must be removed
+#   3. link staying inside the copy    -> must be KEPT, .bin entries need it
+ln -s "$r/secret" "$r/node_modules/abs-escape"
+ln -s ../../secret "$r/node_modules/pkg/rel-escape"
+ln -s ../pkg/index.js "$r/node_modules/.bin/tool"
 
 out=$(cd "$r" && bash "$SCRIPT" prepare 2>/dev/null)
 wt=$(echo "$out" | jq -r '.worktree')
 
 check "dependency arrived in the worktree" "ORIGINAL" "$(cat "$wt/node_modules/pkg/index.js")"
-
-# Nothing under the copied folder may be a link out of the worktree.
-links=$(find "$wt/node_modules" -type l | wc -l | tr -d ' ')
-check "no symlinks inside the copy" "0" "$links"
 check "the folder itself is not a symlink" "1" "$([[ ! -L "$wt/node_modules" ]] && echo 1 || echo 0)"
+
+# The escaping links must be gone.
+check "absolute escaping link removed" "1" "$([[ ! -e "$wt/node_modules/abs-escape" ]] && echo 1 || echo 0)"
+check "relative escaping link removed" "1" "$([[ ! -e "$wt/node_modules/pkg/rel-escape" ]] && echo 1 || echo 0)"
+check "prepare counted what it removed" "2" "$(echo "$out" | jq -r '.neutralized_symlinks')"
+
+# The internal link must survive: removing it would break every .bin entry and
+# make the verify command fail for a reason that has nothing to do with the code.
+check "internal link is kept" "1" "$([[ -L "$wt/node_modules/.bin/tool" ]] && echo 1 || echo 0)"
+
+# Nothing left under the copy may resolve outside the worktree.
+escapes=0
+while IFS= read -r l; do
+  [[ -n "$l" ]] || continue
+  tgt="$(cd "$(dirname "$l")" && cd "$(dirname "$(readlink "$l")")" 2>/dev/null && pwd -P)" || continue
+  case "$tgt/" in "$wt"/*) : ;; *) escapes=$((escapes+1)) ;; esac
+done < <(find "$wt/node_modules" -type l 2>/dev/null)
+check "no surviving link resolves outside the worktree" "0" "$escapes"
+
+# THE POINT, stated as an attack: the main checkout secret must be unreachable.
+echo "PWNED" > "$wt/node_modules/abs-escape/key.txt" 2>/dev/null || true
+check "secret in the main checkout is untouched" "TOPSECRET" "$(cat "$r/secret/key.txt")"
 
 # THE POINT: writing in the worktree must not reach the main checkout.
 echo "MODIFIED BY CODER" > "$wt/node_modules/pkg/index.js"
@@ -1939,6 +2174,9 @@ WORK="${FEATURE}-work"
 SLUG="${FEATURE//\//-}"
 WT="$(dirname "$ROOT")/$(basename "$ROOT")-${SLUG}-work"
 
+TMP_ERR="$(mktemp)"
+trap 'rm -f "$TMP_ERR"' EXIT
+
 branch_exists() { git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$1" >/dev/null; }
 
 # Is $WT registered to this repository and checked out on $WORK?
@@ -1953,25 +2191,67 @@ wt_registered() {
 # Path of this worktree's private git directory, where the manifest lives.
 wt_git_dir() { git -C "$WT" rev-parse --absolute-git-dir 2>/dev/null; }
 
+# Probe cloning between the ACTUAL source and destination, not in /tmp. A clone
+# only works within one filesystem, so a /tmp probe can say yes while the real
+# copy silently falls back to a full copy and skips the size guard.
 clone_supported() {
-  local probe rc
-  probe="$(mktemp -d)"; mkdir -p "$probe/a"; : > "$probe/a/f"
-  if cp -Rc "$probe/a" "$probe/b" 2>/dev/null || cp -R --reflink=always "$probe/a" "$probe/c" 2>/dev/null; then
+  local a="$ROOT/.csc-clone-probe.$$" b="$WT/.csc-clone-probe.$$" rc=1
+  mkdir -p "$a" && : > "$a/f" || { rm -rf "$a"; return 1; }
+  if cp -Rc "$a" "$b" 2>/dev/null || cp -R --reflink=always "$a" "$b" 2>/dev/null; then
     rc=0
-  else
-    rc=1
   fi
-  rm -rf "$probe"
+  rm -rf "$a" "$b"
   return $rc
 }
+
+# CLONE_USED is set by clone_dir to 1 when a real clone happened, 0 when it fell
+# back to a full copy. The caller needs to know which it got.
+CLONE_USED=0
 
 # clone_dir <src> <dst> — copy-on-write where possible, plain copy otherwise.
 # NEVER a symbolic link: a link is a two-way door back into the main checkout.
 clone_dir() {
+  CLONE_USED=1
   cp -Rc "$1" "$2" 2>/dev/null && return 0
-  cp -R --reflink=auto "$1" "$2" 2>/dev/null && return 0
+  cp -R --reflink=always "$1" "$2" 2>/dev/null && return 0
+  CLONE_USED=0
   cp -R "$1" "$2" 2>/dev/null && return 0
   return 1
+}
+
+# resolve_link <path-to-symlink> — echoes the absolute path its target names.
+# The target need not exist. Runs in a subshell so the cd cannot leak out.
+resolve_link() (
+  local l="$1" tgt d b
+  tgt="$(readlink "$l")"
+  if [[ "$tgt" = /* ]]; then d="$(dirname "$tgt")"; else d="$(dirname "$l")/$(dirname "$tgt")"; fi
+  b="$(basename "$tgt")"
+  if cd "$d" 2>/dev/null; then echo "$(pwd -P)/$b"; else echo "$d/$b"; fi
+)
+
+# neutralize_symlinks <dir> — delete every symlink under <dir> whose target
+# resolves OUTSIDE the worktree. Echoes how many it removed.
+#
+# This is the hole three drafts of the design kept leaving open. `cp -R` and
+# `cp -Rc` both PRESERVE symlinks rather than following them, so an absolute
+# link inside node_modules (common in monorepos and in some package managers)
+# still points at the main checkout after copying. Writing through it in the
+# worktree overwrites the real file. Verified 2026-08-22: doing exactly that
+# changed a file in the main checkout.
+#
+# Links that resolve back inside the worktree are kept: node_modules/.bin
+# entries normally point within node_modules and are needed for tests to run.
+neutralize_symlinks() {
+  local dir="$1" removed=0 l abs
+  while IFS= read -r l; do
+    [[ -n "$l" ]] || continue
+    abs="$(resolve_link "$l")"
+    case "$abs/" in
+      "$WT"/*) : ;;                      # stays inside the worktree: safe
+      *) rm -f "$l"; removed=$((removed+1)) ;;
+    esac
+  done < <(find "$dir" -type l 2>/dev/null)
+  echo "$removed"
 }
 
 denied() {
@@ -2015,7 +2295,18 @@ cmd_prepare() {
       || die "git worktree add failed"
   fi
 
-  local copied=() skipped=() d entries
+  local gd manifest
+  gd="$(wt_git_dir)"
+  manifest="$gd/csc-copied"
+
+  # Carry forward what an earlier prepare copied. Rewriting this from an empty
+  # list on a reuse would lose the record, and `remove` would then leave those
+  # folders behind and fail on the untracked files it did not know about.
+  local copied=() skipped=() neutralized=0 d entries removed
+  if [[ -r "$manifest" ]]; then
+    while IFS= read -r d; do [[ -n "$d" ]] && copied+=("$d"); done < "$manifest"
+  fi
+
   local can_clone=0
   clone_supported && can_clone=1
 
@@ -2033,24 +2324,30 @@ cmd_prepare() {
     fi
 
     if clone_dir "$ROOT/$d" "$WT/$d"; then
+      removed="$(neutralize_symlinks "$WT/$d")"
+      neutralized=$(( neutralized + removed ))
       copied+=("$d")
     else
+      rm -rf "${WT:?}/$d"
       skipped+=("$d")
     fi
   done
 
   # remove runs later as a separate invocation, so persist what we created.
-  local gd; gd="$(wt_git_dir)"
   if [[ -n "$gd" ]]; then
-    printf '%s\n' "${copied[@]:-}" | grep -v '^$' > "$gd/csc-copied" || true
+    : > "$manifest"
+    local c
+    for c in "${copied[@]:-}"; do [[ -n "$c" ]] && echo "$c" >> "$manifest"; done
   fi
 
   jq -nc --arg wt "$WT" --arg work "$WORK" --arg feature "$FEATURE" \
          --arg copied "$(IFS=,; echo "${copied[*]:-}")" \
          --arg skipped "$(IFS=,; echo "${skipped[*]:-}")" \
+         --argjson neutralized "$neutralized" --argjson cloned "$can_clone" \
     '{status:"READY", worktree:$wt, work_branch:$work, feature_branch:$feature,
       copied:($copied|split(",")|map(select(length>0))),
-      skipped:($skipped|split(",")|map(select(length>0)))}'
+      skipped:($skipped|split(",")|map(select(length>0))),
+      neutralized_symlinks:$neutralized, clone_supported:($cloned == 1)}'
 }
 
 cmd_remove() {
@@ -2060,6 +2357,8 @@ cmd_remove() {
     return 0
   }
 
+  # Everything below uses `branch -d`, not `-D`. It is safe precisely because
+  # this ancestry check has already proved nothing would be lost.
   if ! git -C "$ROOT" merge-base --is-ancestor "$WORK" "$FEATURE"; then
     local unmerged
     unmerged="$(git -C "$ROOT" log --oneline "$FEATURE..$WORK" | jq -R . | jq -sc .)"
@@ -2079,12 +2378,31 @@ cmd_remove() {
       [[ -n "$d" ]] || continue
       rm -rf "${WT:?}/$d"
     done < "$manifest"
-    rm -f "$manifest"
   fi
 
-  git -C "$ROOT" worktree remove --force "$WT" 2>/dev/null || rm -rf "$WT"
+  # Deliberately NOT --force, and deliberately no `rm -rf` fallback. Both would
+  # delete files the user created in the worktree that this script never made.
+  # If anything unexpected is still there, stop and say so; the user can look.
+  if ! git -C "$ROOT" worktree remove "$WT" 2>"$TMP_ERR"; then
+    local leftover
+    leftover="$(git -C "$WT" status --porcelain 2>/dev/null | head -20)"
+    jq -nc --arg work "$WORK" --arg diag "$(cat "$TMP_ERR" 2>/dev/null)" \
+           --arg leftover "$leftover" \
+      '{status:"REFUSED", work_branch:$work, unmerged:[],
+        diagnostic:("could not remove the worktree; nothing else was deleted: "
+                    + $diag + (if $leftover == "" then "" else "\nremaining: " + $leftover end))}'
+    return 1
+  fi
+  rm -f "$manifest"
+
+  if ! git -C "$ROOT" branch -d "$WORK" >/dev/null 2>"$TMP_ERR"; then
+    jq -nc --arg work "$WORK" --arg diag "$(cat "$TMP_ERR" 2>/dev/null)" \
+      '{status:"REFUSED", work_branch:$work, unmerged:[],
+        diagnostic:("worktree removed but the branch could not be deleted: " + $diag)}'
+    return 1
+  fi
+
   git -C "$ROOT" worktree prune
-  git -C "$ROOT" branch -D "$WORK" >/dev/null 2>&1
 
   jq -nc --arg work "$WORK" \
     '{status:"REMOVED", work_branch:$work, unmerged:[], diagnostic:""}'
@@ -2780,9 +3098,11 @@ Rewrite it around the pools and the harness layer. It must:
   `.claude-plugin/coders.json` rather than listing models in prose.
 - Document the two commands, `/review <spec|plan> <doc-path> [spec-path]` and
   `/implement-plans <plan-path>`, and say that each asks which worker to use.
-- Explain the worktree: the coder works in `<feature>-work` in a sibling folder,
-  dependency folders are copy-on-write clones so the main checkout is never written
-  to, and reviewed work is fast-forwarded onto the feature branch after each task.
+- Explain the worktree: the coder works in `<feature>-work` in a sibling folder, and
+  reviewed work is fast-forwarded onto the feature branch after each task. Dependency
+  folders are brought across as isolated copies — copy-on-write clones where the
+  filesystem supports it, ordinary copies otherwise — and any symlink that would
+  resolve outside the worktree is removed, so the main checkout is never written to.
 - Add a section "Adding a model" (one entry in one JSON file) and "Adding a tool"
   (one file in `scripts/harness/` defining `harness_probe`, `harness_run` and
   `harness_render`, plus a `tests/mock-<tool>` and pool entries).
@@ -2839,9 +3159,16 @@ Rewrite the manual end-to-end checks for the new commands. Cover, against real t
 
 Run:
 ```bash
-for t in tests/test-*.sh; do echo "== $t"; bash "$t" || echo "FAILED: $t"; done
+rc=0
+for t in tests/test-*.sh; do
+  echo "== $t"
+  bash "$t" || { echo "FAILED: $t"; rc=1; }
+done
+exit $rc
 ```
-Expected: every file ends with `PASS=n FAIL=0` and none prints `FAILED:`.
+Expected: every file ends with `PASS=n FAIL=0`, nothing prints `FAILED:`, and the loop
+itself exits 0. The `|| echo` form alone exits 0 even after a failure, which is exactly
+how a broken suite gets committed.
 
 - [ ] **Step 9: Verify the plugin still loads**
 

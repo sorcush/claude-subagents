@@ -1,8 +1,8 @@
 # Reviewer and coder pools
 
 Date: 2026-08-22
-Status: revised twice after independent review by Codex GPT-5.6 Sol.
-No unresolved Critical findings. Ready for planning.
+Status: revised three times after independent review by Codex GPT-5.6 Sol
+(two spec rounds, one plan round). No unresolved Critical findings.
 
 ## Goal
 
@@ -31,9 +31,11 @@ The change is done when all of these are true.
 4. The coder never writes to any file inside the user's main working folder during a
    run. Its commits land on the work branch only, and reach the feature branch only
    after the orchestrator has reviewed them. Dependency folders are brought into the
-   worktree as copy-on-write clones, not symbolic links, so even a write inside a
-   dependency folder cannot reach the main checkout. A test proves this by writing into
-   a cloned folder and asserting the source file is unchanged.
+   worktree as copy-on-write clones, never as symbolic links, and any symlink *inside*
+   a copied folder that resolves outside the worktree is deleted. A test proves this
+   rather than asserting it: it plants an absolute escaping link, a relative escaping
+   link, and a safe internal link, then writes through the escape and checks the main
+   checkout file is unchanged.
 5. The review prompt sent to a reviewer is assembled from the same rubric files, in the
    same order, as the current `cr-delegate.sh` and `cx-delegate.sh` produce.
 6. Continuing an earlier session works for all three tools, and a continued review is
@@ -140,8 +142,9 @@ own error message, so a mistake here is visible immediately and is never silent.
 ## The harness layer
 
 `scripts/harness/<name>.sh` is a shell file that is sourced by a delegate script. It
-must define exactly three functions. Nothing outside these files knows how a tool is
-invoked or what its output looks like.
+must define these three public functions; it may define private helpers alongside
+them. Nothing outside these files knows how a tool is invoked or what its output
+looks like.
 
 ### Calling rules
 
@@ -225,13 +228,21 @@ seconds for a probe, 1800 seconds for a run. Both can be overridden by the envir
 variables `CSC_PROBE_TIMEOUT` and `CSC_RUN_TIMEOUT`. A call stopped by the timeout is a
 failure with reason `timeout`.
 
+A timed-out call returns exit status **124**, the convention GNU `timeout` uses. This
+matters because the delegates invoke the helper inside `( cd "$dir" && ... )`: a shell
+variable set in that subshell is discarded when it exits, but an exit status crosses
+the boundary. Reporting a timeout only through a variable would mean the caller could
+never distinguish a timeout from any other failure.
+
 The helper must terminate the whole **process group**, not just the process it started.
 Killing only the wrapper would leave the underlying tool running, and an edit-capable
 tool could still be changing files after the delegate has already reported `BLOCKED`.
 So the helper starts the command in its own process group with `set -m`, sends `TERM`
 to the negated group id, waits a short grace period, then sends `KILL` to anything
 still alive. It also installs a trap so that an interrupted caller cleans the group up
-rather than orphaning it.
+rather than orphaning it, and **restores the caller's own `INT` and `TERM` traps
+afterwards** rather than clearing them, so it cannot silently disarm the calling
+script's handlers.
 
 ### A note on the Claude reviewer
 
@@ -296,7 +307,8 @@ orchestrator's context through the menu.
 
 ```json
 {"status":"READY","worktree":"/abs/path","work_branch":"feature/x-work",
- "feature_branch":"feature/x","copied":["node_modules"],"skipped":[]}
+ "feature_branch":"feature/x","copied":["node_modules"],"skipped":[],
+ "neutralized_symlinks":0,"clone_supported":true}
 ```
 
 `worktree.sh remove`:
@@ -516,6 +528,24 @@ so it costs almost no space and very little time. When the coder writes to a fil
 inside the clone, the filesystem copies just that one file, and the original in the
 main checkout is untouched.
 
+**Copying is not enough on its own: escaping symlinks must be removed too.** `cp -R`
+and `cp -Rc` both *preserve* symbolic links rather than following them. A dependency
+tree can contain a link pointing outside itself — monorepo package managers create
+these routinely, and some are absolute paths. Such a link survives the copy and still
+points at the main checkout, so writing through it in the worktree changes the real
+file. This was verified on 2026-08-22: an absolute link inside a copied `node_modules`
+let a write in the worktree overwrite a file in the main checkout.
+
+So after copying a folder, `prepare` walks every symlink inside it and resolves the
+target. A link resolving inside the worktree is kept — `node_modules/.bin` entries
+point within `node_modules` and are needed for tests to run. A link resolving anywhere
+else is deleted, and the count is reported in the `neutralized_symlinks` field.
+
+Clone support is probed between the **actual** source and destination directories, not
+in a temporary directory. A clone only works within one filesystem, so a probe done
+elsewhere can report success while the real copy quietly falls back to a full copy and
+bypasses the size guard below.
+
 This was measured on 2026-08-22: `cp -Rc` cloned 500 files in 0.27 seconds, and writing
 to a file in the clone left the source file unchanged.
 
@@ -545,12 +575,19 @@ and asks the user once what to run. There is no configuration file.
 1. Checks that the work branch is an ancestor of the feature branch, meaning every
    commit has already been copied across. If it is not, refuses, prints the missing
    commits, and exits non-zero. Nothing is deleted.
-2. Deletes only the dependency folders that this run created, named from the
-   `copied` list in the `prepare` output. It never deletes anything else in the
-   worktree. This step is required, not cosmetic: `git worktree remove` refuses to run
-   while untracked files are present, and the copied dependencies are untracked.
-3. Removes the worktree folder.
-4. Deletes the work branch.
+2. Deletes only the dependency folders that this run created, named from the manifest
+   `prepare` wrote. It never deletes anything else in the worktree. This step is
+   required, not cosmetic: `git worktree remove` refuses to run while untracked files
+   are present, and the copied dependencies are untracked.
+3. Runs `git worktree remove` **without `--force`, and with no `rm -rf` fallback.**
+   If anything untracked remains, that is a file the user created and this script did
+   not; it returns `REFUSED` with the diagnostic and deletes nothing further. An
+   earlier draft used `--force` with an `rm -rf` fallback and still reported
+   `REMOVED`, which would have silently destroyed the user's own files.
+4. Deletes the work branch with `git branch -d`, not `-D`. The safety that makes this
+   sufficient is step 1, which already proved nothing would be lost.
+5. Every one of these steps is checked. A failure returns `REFUSED` with what remains,
+   never `REMOVED`.
 
 An earlier draft justified this cleanup by claiming `git worktree remove` might follow
 a symbolic link out of the worktree. That was wrong; it does not. The real reason is
@@ -710,3 +747,38 @@ access to this repository. Round two was therefore run with the fix this spec
 prescribes, `-c sandbox_mode="read-only"`, applied by hand. It worked: the reviewer
 resumed with full context and made no writes. The fix is confirmed in practice, not
 only on paper.
+
+### Round three — the plan review, and what it sent back into this spec
+
+The implementation plan (`docs/superpowers/plans/2026-08-22-reviewer-coder-pools.md`)
+was reviewed against this spec. Verdict: needs revision, with 4 Critical findings.
+Three of those were defects in the plan's code alone, but one exposed a hole in *this*
+document, so it is recorded here.
+
+**The copy-on-write clone did not, by itself, deliver the isolation this spec
+promises.** `cp -R` and `cp -Rc` preserve symbolic links instead of following them, so
+a dependency tree containing a link that points outside itself still carries that link
+into the worktree. Verified on 2026-08-22 by planting an absolute link inside a copied
+`node_modules` and writing through it from the worktree: the file in the main checkout
+changed. Success criterion 4 and the copying section now require every symlink inside
+a copied folder to be resolved, with anything escaping the worktree deleted.
+
+This is the third consecutive round in which the same guarantee leaked, by a different
+mechanism each time: link everything ignored, then link a narrower list, then copy but
+keep the links inside. The lesson recorded for the rubrics is that a stated guarantee
+needs a test that attacks it, not a description that restates it.
+
+Two smaller corrections also came back into this spec. `worktree.sh remove` must not
+use `--force` or fall back to `rm -rf`, because both would delete files the user
+created in the worktree while still reporting success; it now refuses instead. And the
+timeout helper must report a timeout through exit status 124 rather than only a shell
+variable, because the delegates call it inside a subshell where a variable assignment
+is discarded — the same subshell trap this spec already warns about for `harness_run`,
+one level further down.
+
+One plan finding was rejected: the reviewer called `out="$(cmd)"` followed by
+`[[ $? -eq 0 ]]` a Critical correctness bug. It is not; bash sets `$?` from the command
+substitution, verified directly. The plan adopts the explicit form anyway, because
+misreading a failed verification as a pass is the worst failure that script could have
+and the pattern breaks if anyone inserts a line between the two. The severity was
+wrong; the advice was still worth taking.
