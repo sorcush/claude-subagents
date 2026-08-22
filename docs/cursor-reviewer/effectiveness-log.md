@@ -115,3 +115,46 @@
   stating the constraint that makes it work (must not be called in a subshell,
   must not write to stdout). Worth adding to `lens-backend.md`: for any shell
   interface, require the calling convention to be written down, not implied.
+
+## 2026-08-22 — reviewer/coder pools design spec, round 2
+
+- **Reviewer:** Codex / GPT-5.6 Sol, resuming session
+  `01a02ba1-f2e0-7dc1-9ae7-417d084ecd29` so it could grade its own round-1
+  findings.
+- **Run:** 2026-08-22 · target `spec` · same doc · lens `backend`.
+- **Findings:** graded the 20 prior findings (16 FIXED, 4 PARTIALLY FIXED), then
+  1 new Critical, 4 Important, 2 Minor. Verdict: **Needs revision**.
+- **Triage outcome:** all 7 new findings accepted; all 4 partials accepted.
+  Nothing rejected this round. The reviewer also revisited both round-1
+  disagreements unprompted: it **accepted** the rejection of command aliases,
+  and **agreed** with the correction that `.env` read access was pre-existing
+  and the real defect was the write path — while correctly refusing to let that
+  agreement excuse the write path itself.
+- **Reviewer quality:** the single best finding of either round was a
+  self-contradiction I had written and not seen: success criterion 4 promised
+  the coder never writes into the main checkout, while the linking section gave
+  it writable symlinks to `node_modules` and build caches. It named both line
+  ranges and refused three times to accept a narrowed allowlist as a fix,
+  because narrowing the list does not close a write path. That was correct and
+  I had twice failed to see it. Resolved with copy-on-write cloning, which the
+  reviewer had not proposed — it offered "copy, mount read-only, or weaken the
+  claim", and `cp -Rc` / `cp --reflink` is the option that keeps the guarantee
+  at near-zero cost (measured: 500 files in 0.27s).
+- **Resume worked, and proved the fix.** Round 1's Critical #5 was that
+  `codex exec resume` silently drops `-s read-only`. Verified against the CLI:
+  no `-C`, no `-s`. This user's `~/.codex/config.toml` sets no `sandbox_mode`
+  and marks `/Users/sandrey/Dev` as `trusted`, so a resumed reviewer really
+  would have had write access. Round 2 was run with the prescribed fix,
+  `-c sandbox_mode="read-only"`, applied by hand — full context retained, zero
+  writes. The fix is confirmed in practice, not only on paper.
+- **Environment friction:** none, once the sandbox flag was added by hand. Note
+  this means the shipped `cx-delegate.sh` resume path should not be used for
+  further rounds until it is fixed.
+- **Recommendations:** (1) Resuming the reviewer's session is clearly worth it
+  for a revision round — grading its own findings caught two places where I had
+  fixed the symptom and not the cause, which a fresh reviewer would have had no
+  reason to look for. Make session resume the default for re-review, not the
+  exception. (2) Add to `lens-backend.md`: when a document states a guarantee,
+  check every mechanism elsewhere in the document against it. Both rounds' worst
+  findings were internal contradictions between a promise and an implementation
+  detail, not defects in either one alone.
