@@ -70,3 +70,48 @@
   Consider having the reviewer's rubric explicitly deprioritize a finding
   it already raised and was told is intentional, to reduce repeated Minor
   noise across rounds.
+
+## 2026-08-22 — reviewer/coder pools design spec
+
+- **Reviewer:** Codex / GPT-5.6 Sol (`cx-delegate.sh`, one round, session
+  `01a02ba1-f2e0-7dc1-9ae7-417d084ecd29`).
+- **Run:** 2026-08-22 · target `spec` ·
+  `docs/superpowers/specs/2026-08-22-reviewer-coder-pools-design.md` ·
+  lens `backend`.
+- **Findings:** 5 Critical, 11 Important, 4 Minor. Verdict: **Needs revision**.
+- **Triage outcome:** 19 of 20 accepted and fixed in one revision. One rejected:
+  the request for aliases or a migration path for the three removed commands —
+  this plugin has a single author and user, and keeping `/cursor-review` alive
+  would preserve exactly the tool-specific naming the change removes. One
+  accepted with a corrected rationale: the reviewer framed over-broad symlinking
+  as a secrets-exposure problem, but read access to `.env` is pre-existing (the
+  coder already runs inside the repo today); the genuinely new defect was the
+  *write* path back into the main checkout through the link.
+- **Reviewer quality:** high, and codebase-grounded rather than generic. It
+  read `cc-delegate.sh`, `cr-delegate.sh` and `cx-delegate.sh` and derived
+  regression risks from the actual current code — most valuably that
+  `cc-delegate.sh` runs `eval "$VERIFY_CMD"` in the caller's directory, so a
+  mechanical port would verify the main checkout instead of the new worktree.
+  Its best finding was structural, not textual: the spec's end-of-run flow said
+  "merge into the branch the run started from", which is incoherent when the run
+  starts *on* the feature branch. That pointed at a bigger error — the design
+  was reimplementing `superpowers:finishing-a-development-branch`, which already
+  determines the base branch and offers merge/PR/keep/discard. Deleting the
+  hand-written flow removed the defect and a whole block of would-be code.
+- **Verified, not assumed:** two claims were checked against the real CLIs
+  before being accepted. `codex exec resume --help` confirms there is no `-C`
+  and no `-s/--sandbox`, so a resumed review really would lose its read-only
+  sandbox — a genuine safety hole, fixed with `-c sandbox_mode="read-only"`.
+  Reading the superpowers skill confirmed the duplication above. No false
+  positives found.
+- **Environment friction:** none. `codex exec` ran first time; the review took
+  three tool-call rounds and returned a well-formed report and session id.
+- **Recommendations:** (1) When a spec proposes new orchestration steps, check
+  first whether an installed superpowers skill already covers them — the
+  reviewer found this by accident via a wording bug, and a rubric line asking
+  "does an existing skill already do this?" would find it directly. (2) The
+  reviewer flagged several places where the spec described a shell contract in
+  prose (`harness_run` sets variables, scripts emit one JSON line) without
+  stating the constraint that makes it work (must not be called in a subshell,
+  must not write to stdout). Worth adding to `lens-backend.md`: for any shell
+  interface, require the calling convention to be written down, not implied.
