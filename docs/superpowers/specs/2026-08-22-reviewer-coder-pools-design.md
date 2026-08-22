@@ -1,7 +1,8 @@
 # Reviewer and coder pools
 
 Date: 2026-08-22
-Status: revised after independent review by Codex GPT-5.6 Sol; ready for planning
+Status: revised twice after independent review by Codex GPT-5.6 Sol.
+No unresolved Critical findings. Ready for planning.
 
 ## Goal
 
@@ -29,7 +30,10 @@ The change is done when all of these are true.
    enforces this.
 4. The coder never writes to any file inside the user's main working folder during a
    run. Its commits land on the work branch only, and reach the feature branch only
-   after the orchestrator has reviewed them.
+   after the orchestrator has reviewed them. Dependency folders are brought into the
+   worktree as copy-on-write clones, not symbolic links, so even a write inside a
+   dependency folder cannot reach the main checkout. A test proves this by writing into
+   a cloned folder and asserting the source file is unchanged.
 5. The review prompt sent to a reviewer is assembled from the same rubric files, in the
    same order, as the current `cr-delegate.sh` and `cx-delegate.sh` produce.
 6. Continuing an earlier session works for all three tools, and a continued review is
@@ -216,11 +220,18 @@ guaranteed to keep its mode and folder, the harness must refuse to resume rather
 run unsafely.
 
 **Timeouts.** No call may run without a limit. macOS has no `timeout` program by
-default, so `scripts/lib/timeout.sh` provides a small portable helper that runs a
-command in the background and terminates it after a given number of seconds. Defaults:
-120 seconds for a probe, 1800 seconds for a run. Both can be overridden by the
-environment variables `CSC_PROBE_TIMEOUT` and `CSC_RUN_TIMEOUT`. A call stopped by the
-timeout is a failure with reason `timeout`.
+default, so `scripts/lib/timeout.sh` provides a small portable helper. Defaults: 120
+seconds for a probe, 1800 seconds for a run. Both can be overridden by the environment
+variables `CSC_PROBE_TIMEOUT` and `CSC_RUN_TIMEOUT`. A call stopped by the timeout is a
+failure with reason `timeout`.
+
+The helper must terminate the whole **process group**, not just the process it started.
+Killing only the wrapper would leave the underlying tool running, and an edit-capable
+tool could still be changing files after the delegate has already reported `BLOCKED`.
+So the helper starts the command in its own process group with `set -m`, sends `TERM`
+to the negated group id, waits a short grace period, then sends `KILL` to anything
+still alive. It also installs a trap so that an interrupted caller cleans the group up
+rather than orphaning it.
 
 ### A note on the Claude reviewer
 
@@ -271,7 +282,7 @@ orchestrator's context through the menu.
 
 ```json
 {"status":"DONE|BLOCKED","coder":"<key>","session_id":"...","attempts":N,
- "verified":true|false,"changed":true|false,"result":"...","verify_output":"..."}
+ "verified":true|false,"changed":true|false,"commit_id":"...","result":"...","verify_output":"..."}
 ```
 
 `review-delegate.sh`:
@@ -285,7 +296,7 @@ orchestrator's context through the menu.
 
 ```json
 {"status":"READY","worktree":"/abs/path","work_branch":"feature/x-work",
- "feature_branch":"feature/x","linked":["node_modules"]}
+ "feature_branch":"feature/x","copied":["node_modules"],"skipped":[]}
 ```
 
 `worktree.sh remove`:
@@ -341,8 +352,10 @@ themselves, they pass the report through without editing it, and they always rep
 3. Otherwise it runs `git -C <worktree> add -A && git -C <worktree> commit -m "..."`.
    If the commit fails, that is a `BLOCKED` result with the git error, never a silent
    success.
-4. It reports the resulting commit id. That commit is what the orchestrator reviews and
-   what the fast-forward moves across.
+4. It reports the resulting commit id in the `commit_id` field of the script's JSON
+   line, and repeats it in its own report to the orchestrator. That commit is what the
+   orchestrator reviews and what the fast-forward moves across. When `changed` is
+   `false`, `commit_id` is an empty string.
 
 The old rule "never commit on main or master" is replaced by step 1, which is stricter:
 the branch must be the specific work branch for this run.
@@ -367,10 +380,10 @@ Before every fresh delegation the orchestrator:
 3. If the pool has four entries or fewer, uses the pop-up menu. If it has more than
    four, prints a numbered list and asks the user to type a number.
 
-The menu shows entries in file order. It never reorders them. The entry marked
-`default` is shown first in the list of choices when the pop-up menu is used, and is
-marked as recommended; the user must still choose. If no entry is marked `default`,
-none is marked as recommended and nothing else changes. If the pool is empty, that is a
+The menu shows entries in file order, always, in both the pop-up and the numbered
+list. It never reorders them. The entry marked `default` is marked in place as
+recommended; it is not moved to the top. The user must still choose. If no entry is
+marked `default`, none is marked as recommended and nothing else changes. If the pool is empty, that is a
 validation error from `pool.sh`, and the command stops.
 
 The first time a role is needed in a run, the orchestrator asks two things together:
@@ -460,43 +473,69 @@ Safe to run more than once, because it verifies before it reuses.
      prints which check failed:
      - `git worktree list --porcelain` shows the folder registered to this repository
        and checked out on the work branch;
-     - the feature branch is an ancestor of the work branch, so the worktree is not
-       built on an older commit;
      - `git -C <worktree> status --porcelain` is empty, so no uncommitted work is left
-       from an earlier run.
+       from an earlier run;
+     - the work branch points at **exactly the same commit** as the feature branch.
+
+     The last check is the strict one, and it replaces a weaker "is an ancestor of"
+     test from an earlier draft. A work branch that is merely clean and descended from
+     the feature branch may still be carrying commits from an abandoned earlier run,
+     which the very first fast-forward of the new run would pull in as if this run had
+     produced them. When the work branch is ahead, `prepare` refuses and lists the extra
+     commits, so the user can either merge them deliberately or delete the branch. It
+     never decides that on its own.
    - **Only one exists** — refuses. A branch without its worktree, or a folder without
      its branch, is a leftover from an interrupted run and needs a person to look at
      it.
 4. Links the dependency folders, described below.
 5. Prints its JSON line.
 
-### Linking dependency folders
+### Copying dependency folders
 
 A worktree contains only tracked files, so an installed dependency folder is missing
 and a verify command such as `npm test` would fail for reasons that have nothing to do
 with the code.
 
-`prepare` links a fixed built-in list of dependency folders. A folder is linked only if
-it is at the top level of the repository, exists, is ignored by git, and is on the
-list:
+`prepare` brings across a fixed built-in list of dependency folders. A folder is taken
+only if it is at the top level of the repository, exists, is ignored by git, and is on
+the list:
 
 ```
 node_modules  .venv  venv  vendor  .bundle  target  .gradle  .m2  .tox  .cargo
 ```
 
-Nothing is linked if it matches any of these patterns, even if it is also on the list:
+Nothing is taken if it matches any of these patterns, even if it is also on the list:
 
 ```
 .env*  *.pem  *.key  *.p12  credentials*  .netrc  .npmrc  .aws  .ssh
 ```
 
-An earlier draft of this design linked **everything** git ignores. That was wrong, for
-a reason worth writing down. A symbolic link is a two-way door: the coder has edit
-permission, so a link to your real `node_modules` lets it write into your main working
-folder, which is precisely what this whole change exists to prevent. Reading secrets
-is a smaller concern, because the coder already runs inside your repository today and
-can already read `.env`; the new and genuinely wrong part was the write path. The fixed
-list closes it while keeping the common cases working with no configuration.
+**They are copied, not linked, using a copy-on-write clone.** On macOS this is
+`cp -Rc`; on Linux it is `cp --reflink=auto`. A clone shares the underlying disk blocks,
+so it costs almost no space and very little time. When the coder writes to a file
+inside the clone, the filesystem copies just that one file, and the original in the
+main checkout is untouched.
+
+This was measured on 2026-08-22: `cp -Rc` cloned 500 files in 0.27 seconds, and writing
+to a file in the clone left the source file unchanged.
+
+If the filesystem does not support cloning, `cp` falls back to a real copy on its own.
+`prepare` therefore counts the entries in a folder first. Under 5000 entries it copies
+anyway. At or above 5000 it skips the folder, records it in the `skipped` field of its
+output, and the orchestrator warns the user that a verify command may fail for a
+missing dependency. It never silently spends minutes copying a large folder.
+
+**Why not symbolic links.** Two earlier drafts of this design got this wrong, and the
+reason is worth writing down. The first linked **everything** git ignores. The second
+narrowed the list but still used links. Both were unsafe for the same reason: a
+symbolic link is a two-way door. The coder has edit permission, so a link to your real
+`node_modules` lets it write into your main working folder, and an `npm install` in the
+worktree would change your actual dependencies. That directly contradicts success
+criterion 4. A copy-on-write clone gives the same speed with none of that exposure.
+
+Reading secrets is a separate and smaller concern. It is not new, because the coder
+already runs inside your repository today and can already read `.env`. The denylist
+above reduces it anyway, at no cost.
 
 If a verify command still fails because something is missing, the orchestrator says so
 and asks the user once what to run. There is no configuration file.
@@ -506,10 +545,17 @@ and asks the user once what to run. There is no configuration file.
 1. Checks that the work branch is an ancestor of the feature branch, meaning every
    commit has already been copied across. If it is not, refuses, prints the missing
    commits, and exits non-zero. Nothing is deleted.
-2. Removes the worktree folder.
-3. Deletes the work branch.
-4. Removes any symbolic link it created, before removing the folder, so that
-   `git worktree remove` cannot follow a link out of the worktree.
+2. Deletes only the dependency folders that this run created, named from the
+   `copied` list in the `prepare` output. It never deletes anything else in the
+   worktree. This step is required, not cosmetic: `git worktree remove` refuses to run
+   while untracked files are present, and the copied dependencies are untracked.
+3. Removes the worktree folder.
+4. Deletes the work branch.
+
+An earlier draft justified this cleanup by claiming `git worktree remove` might follow
+a symbolic link out of the worktree. That was wrong; it does not. The real reason is
+the untracked-file refusal in step 2, and the rule that this script only ever deletes
+what it created.
 
 ### Moving work across
 
@@ -539,12 +585,15 @@ a real merge, because a conflict in the middle of a run is worse than stopping.
 | Key given on the command line is not in the pool | Exit 2, and list the valid keys. |
 | Probe fails | Command reports the tool's own error and gives advice matching `reason`: log in for `auth`, trust the workspace for `trust`, install the tool for `not-installed`, check the pool file for `bad-model`. It never says "log in" for a failure that is not an authentication failure. |
 | Tool call fails or returns nothing | `BLOCKED` with the tool's own error in `diagnostic` or `verify_output`. Exit 1. |
-| Call exceeds its timeout | Terminated, treated as `BLOCKED` with reason `timeout`. |
+| A probe exceeds its timeout | The whole process group is terminated. `probe.sh` prints `FAILED` with reason `timeout`. |
+| A delegate call exceeds its timeout | The whole process group is terminated. The delegate prints `BLOCKED` with reason `timeout`. Probe failures and delegate failures use different words on purpose: a probe never returns `BLOCKED`, and a delegate never returns `FAILED`. |
 | Verify command still fails after all retries | `BLOCKED` with the last verify output. |
 | Empty `session_id` on a result that otherwise looks successful | Treated as `BLOCKED`. A missing session id means the tool never really ran. |
 | Current branch is `main`, `master`, or ends in `-work` | `prepare` fails and the command stops. |
 | Working folder has uncommitted changes | Command stops before creating the worktree and asks the user to commit or stash. |
 | Worktree or work branch exists but fails a reuse check | `prepare` refuses, naming the failed check. Nothing is deleted or overwritten. |
+| Work branch is ahead of the feature branch on reuse | `prepare` refuses and lists the extra commits. The user decides whether to merge or delete them. |
+| A dependency folder has 5000 entries or more and cloning is unavailable | The folder is skipped and named in `skipped`. The orchestrator warns that a verify command may fail for a missing dependency. |
 | Fast-forward not possible | Orchestrator stops and reports. |
 | `remove` finds unmerged commits | Refuses, lists them, deletes nothing. |
 | Coder changed no files | `DONE` with `changed:false`. No commit. The fast-forward is a no-op. |
@@ -564,8 +613,9 @@ and `tests/mock-codex` already exist. A new `tests/mock-claude` is added.
 | `tests/test-pool.sh` | Valid file parses and preserves order. Broken JSON, wrong top-level key, empty array, entry not an object, missing field, unknown field, bad key format, bad model format, bad harness format, harness file absent, duplicate key, two defaults, non-boolean default, unknown key on the command line. A `harness` value containing `..` is rejected. The listing output contains no `model` field. |
 | `tests/test-code-delegate.sh` | Run once for each of the three fake tools: success; verify fails then succeeds on retry; retries exhausted; tool failure; empty session id; no changes made. Also: `--cwd` that does not exist is rejected; the verify command runs in `--cwd` and not in the caller's folder; every git call carries `-C`. |
 | `tests/test-review-delegate.sh` | Run once for each of the three fake tools: success; rubric and lens files assembled in the right order; unknown lens rejected; missing rubric file; empty report; tool failure. Also: the codex resume path includes `-c sandbox_mode="read-only"`, and the cursor and claude resume paths keep their read-only flags. |
-| `tests/test-worktree.sh` | Uses a real temporary git repository. Create; run twice with no harm; refuse on `main`; refuse on a branch ending in `-work`; refuse when only the branch exists; refuse when only the folder exists; refuse when the worktree is dirty; refuse when the worktree sits on an older commit; refuse when the folder name is taken by something else; link a folder on the list; do not link a folder that is ignored but not on the list; do not link `.env`; refuse to remove with unmerged commits; remove cleanly when merged, leaving no dangling link. |
-| `tests/test-timeout.sh` | The portable helper terminates a command that runs too long and returns a failure, and does not disturb a command that finishes in time. |
+| `tests/test-worktree.sh` | Uses a real temporary git repository. Create; run twice with no harm; refuse on `main`; refuse on a branch ending in `-work`; refuse when only the branch exists; refuse when only the folder exists; refuse when the worktree is dirty; refuse when the folder name is taken by something else; **refuse when the work branch is clean but ahead of the feature branch, and list the extra commits**; copy a folder on the list; do not copy a folder that is ignored but not on the list; do not copy `.env`; skip a folder of 5000 entries or more and report it in `skipped`; refuse to remove with unmerged commits; remove deletes only the folders it created and leaves other untracked files alone; remove succeeds even though the copied dependencies were untracked. |
+| `tests/test-worktree-isolation.sh` | The guarantee in success criterion 4, proved rather than asserted. Creates a repository with an ignored dependency folder, runs `prepare`, writes to a file inside the copied folder in the worktree, and checks the source file in the main checkout is unchanged. Also checks no entry in the worktree's dependency folder is a symbolic link pointing outside the worktree. |
+| `tests/test-timeout.sh` | The portable helper terminates a command that runs too long and returns a failure, and does not disturb a command that finishes in time. It also kills a **child** of the timed-out command, not only the command itself: the test starts a script that spawns a long-running child, lets it time out, and asserts the child is gone. |
 | `tests/test-no-model-names.sh` | Reads every `label` and `model` from both pool files, and searches every file in `commands/` and `agents/` for them. Fails on any match. The search matches each whole value as one string, not word by word, because single words such as `Claude` and `Cursor` appear legitimately in those files. This is what keeps the orchestrator model-agnostic as the code changes over time. |
 
 Removed: `tests/test-sync-models.sh`, `tests/test-drift-coverage.sh`,
@@ -605,21 +655,58 @@ not orphaned. Each new entry gains a line naming the worker that was used.
 
 ## Review history
 
-Reviewed on 2026-08-22 by Codex GPT-5.6 Sol against the spec and lens-backend rubrics.
-Verdict: needs revision, five Critical findings. All five were accepted and are fixed
-above: the undefined base branch (fixed by using
-`superpowers:finishing-a-development-branch` rather than a hand-written flow), unsafe
-worktree reuse, over-broad linking of ignored files, the unstated working folder for
-verification, and the loss of the read-only sandbox on a resumed Codex call. Every
+Two rounds with Codex GPT-5.6 Sol, spec and lens-backend rubrics, the second resuming
+the first reviewer's own session so it could grade its earlier findings.
+
+### Round one — verdict: needs revision (5 Critical, 11 Important, 4 Minor)
+
+All five Critical findings were accepted and fixed: the undefined base branch (fixed by
+using `superpowers:finishing-a-development-branch` rather than a hand-written flow),
+unsafe worktree reuse, over-broad linking of ignored files, the unstated working folder
+for verification, and the loss of the read-only sandbox on a resumed Codex call. Every
 Important and Minor finding was also accepted.
 
-One finding was rejected: the suggestion to keep the old command names as aliases or to
-document a migration path beyond the version bump. This plugin has a single author and
-user, and keeping a name such as `/cursor-review` would preserve the tool-specific
-naming this change exists to remove. The major version bump and the CHANGELOG entry are
-the migration path.
+One finding was rejected: the suggestion to keep the old command names as aliases. This
+plugin has a single author and user, and keeping a name such as `/cursor-review` would
+preserve the tool-specific naming this change exists to remove. The major version bump
+and the CHANGELOG entry are the migration path. **The reviewer accepted this reasoning
+in round two.**
 
 One finding was accepted with a correction to its reasoning: the over-broad linking was
 described as exposing secrets unnecessarily. Read access to `.env` is not new, because
 the coder already runs inside the repository today. The new and genuinely wrong part
-was the write path back into the main checkout through a symbolic link.
+was the write path back into the main checkout. **The reviewer agreed with this
+correction in round two**, while correctly noting that agreeing with it did not make
+the write path acceptable.
+
+### Round two — verdict: needs revision (1 new Critical, 4 Important, 2 Minor)
+
+Of the twenty round-one findings, sixteen were graded FIXED and four PARTIALLY FIXED.
+
+The new Critical finding was a genuine self-contradiction: success criterion 4 promised
+the coder never writes into the main working folder, while the linking section handed
+it writable symbolic links to `node_modules` and build caches. Both could not be true.
+Resolved by cloning with copy-on-write (`cp -Rc` on macOS, `cp --reflink=auto` on
+Linux) instead of linking, which keeps the promise true and was measured at 500 files
+in 0.27 seconds. A test now proves the guarantee instead of asserting it.
+
+The four partially-fixed findings and the remaining new ones were all accepted: worktree
+reuse now requires the work branch to point at exactly the same commit as the feature
+branch, rather than merely being a clean descendant that might carry an abandoned run's
+commits; the menu no longer both preserves file order and moves the default to the top;
+the timeout helper now kills the whole process group, so a timed-out tool cannot keep
+editing after the delegate has reported `BLOCKED`; the cleanup step's justification was
+corrected, because `git worktree remove` does not follow symbolic links, and the real
+reason is its refusal to run while untracked files are present; `commit_id` was added to
+the delegate's output contract; and probe timeouts now report `FAILED` while delegate
+timeouts report `BLOCKED`, which the two schemas had disagreed about.
+
+### Note on how round two was run
+
+The current `cx-delegate.sh` resume path is the one round one found to be unsafe: it
+omits `-s read-only`, and this user's `~/.codex/config.toml` marks `/Users/sandrey/Dev`
+as trusted with no `sandbox_mode` set, so a resumed reviewer would have had write
+access to this repository. Round two was therefore run with the fix this spec
+prescribes, `-c sandbox_mode="read-only"`, applied by hand. It worked: the reviewer
+resumed with full context and made no writes. The fix is confirmed in practice, not
+only on paper.
