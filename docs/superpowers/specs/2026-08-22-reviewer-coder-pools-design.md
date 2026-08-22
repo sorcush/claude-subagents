@@ -46,8 +46,8 @@ Out of scope:
 {
   "reviewers": [
     { "key": "codex-sol",    "label": "Codex GPT-5.6 Sol",  "harness": "codex",  "model": "gpt-5.6-sol", "default": true },
-    { "key": "cursor-grok",  "label": "Cursor Grok 4.6",    "harness": "cursor", "model": "cursor-grok-4.6" },
-    { "key": "cursor-sol",   "label": "Cursor GPT-5.6 Sol", "harness": "cursor", "model": "gpt-5.6-sol" },
+    { "key": "cursor-grok",  "label": "Cursor Grok 4.6",    "harness": "cursor", "model": "cursor-grok-4.6-high" },
+    { "key": "cursor-sol",   "label": "Cursor GPT-5.6 Sol", "harness": "cursor", "model": "gpt-5.6-sol-high" },
     { "key": "claude-opus5", "label": "Claude Opus 5",      "harness": "claude", "model": "claude-opus-5" }
   ]
 }
@@ -78,11 +78,27 @@ The order of entries in the file is the order in the menu.
 
 ### Model id confirmation
 
-The ids above are the best known values at the time of writing. `cursor-agent` was not
-logged in, so the Cursor ids could not be listed. Before release, confirm all six ids
-against a logged-in `cursor-agent` and `codex`. A wrong id is caught on first use by
-`scripts/probe.sh`, which fails with the tool's own error message, so a mistake here is
-visible immediately and is not silent.
+All ids above were checked on 2026-08-22.
+
+| Id | How it was checked |
+|---|---|
+| `gpt-5.6-sol` (codex) | Real `codex exec` probe. Answered. |
+| `gpt-5.6-luna` (codex) | Real `codex exec` probe. Answered. |
+| `cursor-grok-4.6-high` | Listed by `cursor-agent models` as "Cursor Grok 4.6". |
+| `gpt-5.6-sol-high` | Listed by `cursor-agent models` as "GPT-5.6 Sol 1M High". |
+| `composer-2.5` | Listed by `cursor-agent models` as "Composer 2.5 (current)". |
+| `claude-opus-5` | The model id used by this project's own Claude Code sessions. |
+
+Cursor has no plain `cursor-grok-4.6` or `gpt-5.6-sol` id. Every Cursor id carries an
+effort level, and most have a `-fast` twin.
+
+**Rule for choosing Cursor ids: never use a `-fast` variant, for any provider.** Fast
+variants cost more. Use the plain id at the same effort level. This is why the two
+Cursor reviewers use `-high` and not `-high-fast`, even though the plugin used
+`cursor-grok-4.5-high-fast` before this change.
+
+A wrong id is caught on first use by `scripts/probe.sh`, which fails with the tool's
+own error message, so a mistake here is visible immediately and is never silent.
 
 ## The harness layer
 
