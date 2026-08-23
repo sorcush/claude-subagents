@@ -22,7 +22,7 @@ if [[ "${MOCK_FAIL_CLI:-0}" == "1" ]]; then
   exit 1
 fi
 
-session="${MOCK_SESSION:-sess-mock-1}"
+session="${MOCK_SESSION-sess-mock-1}"
 # Use ${VAR-default} (not :-) so an explicit empty MOCK_RESULT stays empty.
 result="${MOCK_RESULT-done}"
 
