@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `-c sandbox_mode="read-only"`.
 - The verify command ran in the caller's directory rather than the coder's.
 
+## [2.2.0] - 2026-08-23
+
+### Changed
+- **BREAKING:** rename plugin to claude-subagents
+
 ## [2.1.0] - 2026-08-23
 
 ### Added
