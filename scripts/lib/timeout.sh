@@ -39,19 +39,29 @@ run_with_timeout() {
     # Write the flag BEFORE signalling. If we signalled first, the command
     # could be reaped and its pid reused by an unrelated process before we
     # recorded anything, and we would have no way to tell the two apart.
-    if kill -0 "$pid" 2>/dev/null; then
+    # `kill -0` alone is not enough: it also succeeds for a ZOMBIE, a process that
+    # has already exited and is only waiting to be reaped. Without the extra check,
+    # a command that finished at the exact instant the deadline fell would be
+    # recorded as a timeout and its real exit status thrown away.
+    if kill -0 "$pid" 2>/dev/null \
+       && ! ps -p "$pid" -o stat= 2>/dev/null | grep -q '^[[:space:]]*Z'; then
       echo 1 > "$flag"
       kill -TERM -"$pid" 2>/dev/null
       sleep 5
       # Re-check: the TERM may already have worked, and by now this pid could
       # belong to something else entirely.
       if [[ -s "$flag" ]] && kill -0 "$pid" 2>/dev/null; then
+        # Accepted limitation: signalling by PID cannot rule out the kernel having
+        # recycled that PID between the child being reaped and this line. Closing
+        # that needs pidfd, which is not portable to macOS. The window is
+        # microseconds and the guard above makes it narrower still.
         kill -KILL -"$pid" 2>/dev/null
       fi
     fi
   } &
   watcher=$!
 
+  # Deliberately untested: triggering this trap needs a signal delivered mid-wait.
   # While the child runs, an interrupt should take the whole group down rather
   # than orphaning it.
   trap 'kill -KILL -'"$pid"' 2>/dev/null; kill '"$watcher"' 2>/dev/null' INT TERM
