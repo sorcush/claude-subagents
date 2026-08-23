@@ -10,10 +10,13 @@
 #   MOCK_SESSION=<id>    -> thread_id to emit (default mock-thread-1)
 #   MOCK_RESULT=<text>   -> agent_message text to emit (default "done"; empty stays empty)
 #   MOCK_STREAM=1        -> emit a non-agent_message item.completed event before the final one
+#   MOCK_STREAM_TEXT=<text> -> text of the progress event (default "exploring README.md")
+#   MOCK_SLEEP=<secs>    -> stall this long before answering, to exercise timeouts
 #   MOCK_LOG=<path>      -> append "ARGS: $*" (all argv, incl. the prompt) to this file
 set -euo pipefail
 
 if [[ -n "${MOCK_LOG:-}" ]]; then echo "ARGS: $*" >> "$MOCK_LOG"; fi
+if [[ -n "${MOCK_SLEEP:-}" ]]; then sleep "$MOCK_SLEEP"; fi
 if [[ -n "${MOCK_STDERR:-}" ]]; then echo "$MOCK_STDERR" >&2; fi
 
 session="${MOCK_SESSION:-mock-thread-1}"
@@ -33,7 +36,8 @@ if [[ "${MOCK_TURN_FAILED:-0}" == "1" ]]; then
 fi
 
 if [[ "${MOCK_STREAM:-0}" == "1" ]]; then
-  printf '{"type":"item.completed","item":{"id":"item_pre","type":"reasoning","text":"exploring README.md"}}\n'
+  printf '{"type":"item.completed","item":{"id":"item_pre","type":"reasoning","text":"%s"}}\n' \
+    "${MOCK_STREAM_TEXT:-exploring README.md}"
 fi
 
 printf '{"type":"item.completed","item":{"id":"item_final","type":"agent_message","text":"%s"}}\n' "$result"

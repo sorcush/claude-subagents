@@ -61,6 +61,16 @@ done
 # A progress event that merely mentions READY must not count as the answer. The
 # stream text is set explicitly: with the mock's default text this test would pass
 # for the wrong reason and could never catch the bug it exists for.
+# The check below is only meaningful if the progress event actually contains READY.
+# Assert that precondition first: without it, a mock that ignores MOCK_STREAM_TEXT
+# leaves no READY anywhere in the stream, and even a naive grep-the-whole-output
+# implementation would pass. Verified: with the mock change stashed, the suite still
+# reported 26/26.
+raw=$(MOCK_STREAM=1 MOCK_STREAM_TEXT="READY" MOCK_RESULT="all done" \
+      "$HERE/mock-codex" exec --json 2>/dev/null)
+check "mock honours MOCK_STREAM_TEXT" "1" \
+  "$([[ "$raw" == *'"text":"READY"'* ]] && echo 1 || echo 0)"
+
 out=$(MOCK_STREAM=1 MOCK_STREAM_TEXT="READY" MOCK_RESULT="all done" \
       bash "$SCRIPT" --role reviewer --key c-codex 2>/dev/null)
 check "READY in a progress event does not pass" "FAILED" "$(echo "$out" | jq -r '.status')"
