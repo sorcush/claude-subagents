@@ -41,3 +41,56 @@
   multi-file tasks (4, 9) ran close to or over the delegate timeout window — consider a higher
   `--max-retries`/timeout default for tasks the plan already flags as larger in scope, rather than
   discovering the ceiling mid-run.
+
+## 2026-08-22/23 — reviewer/coder pools (9 tasks, subagent-driven)
+
+- **Run:** plan `docs/superpowers/plans/2026-08-22-reviewer-coder-pools.md` · branch
+  `feature/reviewer-coder-pools` · 9 tasks (7 dispatches; 7+8 batched) · 28 commits ·
+  implementer `cursor-coder-delegator` / Composer 2.5 throughout.
+- **Outcome:** every task passed verification first try (`attempts:0` on all dispatches).
+  Zero BLOCKED, zero NEEDS_CONTEXT. But **every task needed at least one fix round** —
+  8 fix rounds plus a 6-finding final wave. Final state: 285 checks green across 10
+  suites, two consecutive clean runs.
+- **Where the defects actually came from.** Composer transcribed the briefs faithfully.
+  Of roughly 25 real defects found, essentially all originated in the briefs *I* wrote.
+  Composer independently corrected four of my errors: the `IFS=$'\t' read` empty-field
+  collapse, the multi-line `MOCK_LOG` assumption, the `has()` helper's argument
+  misalignment, and a `return 0` in my own demonstration instructions that would have
+  broken arithmetic expansion. That is the delegation working as intended.
+- **The dominant defect class, by a wide margin: tests that cannot fail.** Seven found,
+  plus two more of the same family in the final review. Variants seen:
+  a test whose fixture lacked the thing it tested; an assertion of non-emptiness against
+  a field with a constant prefix; an assertion of a flag's *absence*, which passes when
+  the flag is missing entirely; and a grep pattern that could not match the real code,
+  satisfied instead by a prose sentence. Twice a coder made a test pass by adding code
+  or text rather than fixing the real problem.
+  **What worked:** requiring a break-it demonstration with every new test — break the
+  subject, show the suite goes red on the right check, restore. Once that became a
+  standing requirement, no new unfailable test survived a round.
+- **Reviewer quality:** consistently high and specific. The whole-branch review earned
+  its cost outright: it found two Critical isolation breaches that no per-task review
+  could see, and both reproduced on first attempt. It also diagnosed two anomalies I had
+  logged as unexplained — an `--argjson` receiving an empty string exits jq with no
+  output at all, and `ps -p ""` is nondeterministic on macOS. Two reviewer findings were
+  wrong and were rejected with evidence (`--allowedTools` formatting; a `$?`-after-
+  assignment "bug" that is correct bash).
+- **Environment friction:** `jq` resolves to a pyenv shim at ~205ms per call, which
+  turned an O(entries) validator into a 14-second call and a >2-minute suite until it was
+  rewritten as a single pass (35x faster). Two API session limits interrupted reviews;
+  both resumed with state intact.
+- **Reliability flags:** one premature `DONE` reported while the delegate script was
+  still running, with no session id — the id arrived in a later message, so nothing was
+  lost, but a controller trusting the first report would have concluded the session was
+  unrecoverable. One commit used an explicit file list instead of `git add -A` and left
+  two modified files uncommitted, so the suite was passing on dirty working-tree state.
+- **Controller lessons worth carrying forward.** (1) Never measure a test suite while a
+  delegated agent is mid-demonstration — three "regressions" I reported were my runs
+  colliding with the agent deliberately breaking and restoring code; an mtime 20 minutes
+  out of step with its siblings gave it away. (2) Verify with the tool the code will
+  actually run under: three of my checks reported false failures because they ran under
+  zsh, used a relative path where the code changes directory, or read a flattened log.
+- **Recommendations:** (1) Add to `rubrics/plan-review.md`: "for each test, name an input
+  that would make it fail; if you cannot, the test proves nothing." (2) Add to
+  `rubrics/lens-backend.md`: "a stated guarantee needs a test that attacks it, not prose
+  that restates it" — the isolation guarantee leaked three times in design and twice more
+  in implementation, each time caught only after being written down as safe.

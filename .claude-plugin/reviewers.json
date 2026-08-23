@@ -1,8 +1,29 @@
 {
   "reviewers": [
-    { "key": "codex-sol",    "label": "Codex GPT-5.6 Sol",  "harness": "codex",  "model": "gpt-5.6-sol", "default": true },
-    { "key": "cursor-grok",  "label": "Cursor Grok 4.6",    "harness": "cursor", "model": "cursor-grok-4.6-high" },
-    { "key": "cursor-sol",   "label": "Cursor GPT-5.6 Sol", "harness": "cursor", "model": "gpt-5.6-sol-high" },
-    { "key": "claude-opus5", "label": "Claude Opus 5",      "harness": "claude", "model": "claude-opus-5" }
+    {
+      "key": "codex-sol",
+      "label": "Codex GPT-5.6 Sol",
+      "harness": "codex",
+      "model": "gpt-5.6-sol",
+      "default": true
+    },
+    {
+      "key": "cursor-grok",
+      "label": "Cursor Grok 4.6",
+      "harness": "cursor",
+      "model": "cursor-grok-4.6-high"
+    },
+    {
+      "key": "cursor-sol",
+      "label": "Cursor GPT-5.6 Sol",
+      "harness": "cursor",
+      "model": "gpt-5.6-sol-high"
+    },
+    {
+      "key": "claude-opus5",
+      "label": "Claude Opus 5",
+      "harness": "claude",
+      "model": "claude-opus-5"
+    }
   ]
 }
