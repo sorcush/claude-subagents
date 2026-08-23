@@ -49,6 +49,9 @@ for k in c-cursor c-codex c-claude; do
   check "$k emits one JSON line" "1"      "$(echo "$out" | wc -l | tr -d ' ')"
 done
 
+out=$(MOCK_SESSION="sess-xyz-991" run --coder c-codex --verify-cmd "true" 2>/dev/null)
+check "reports the coder's real session id" "sess-xyz-991" "$(echo "$out" | jq -r '.session_id')"
+
 # --- no verify command: trusted, but reported as unverified ---
 out=$(run --coder c-codex --verify-cmd "" 2>/dev/null)
 check "empty verify cmd is DONE"      "DONE"  "$(echo "$out" | jq -r '.status')"
@@ -73,6 +76,13 @@ check "exhausted retries is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')
 check "exhausted retries counts up"  "2"       "$(echo "$out" | jq -r '.attempts')"
 check "verify output is kept"        "1" \
   "$([[ -n "$(echo "$out" | jq -r '.verify_output')" ]] && echo 1 || echo 0)"
+# Guards the fallback above: a verify command that DOES print must have its real
+# output propagated verbatim. Without this, removing the capture entirely still
+# passes, because the fallback alone satisfies a non-emptiness check. Verified:
+# with the capture removed, the suite reported 44/44 before this test existed.
+out=$(run --coder c-codex --verify-cmd "echo distinctive-marker-8842; false" --max-retries 1 2>/dev/null)
+check "real verify output is propagated" "1" \
+  "$([[ "$(echo "$out" | jq -r '.verify_output')" == *distinctive-marker-8842* ]] && echo 1 || echo 0)"
 
 run --coder c-codex --verify-cmd "false" --max-retries 1 >/dev/null 2>&1
 check "BLOCKED exits 1" "1" "$?"

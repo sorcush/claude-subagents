@@ -92,6 +92,11 @@ run_verify() {
   VERIFY_RC=$?
   VERIFY_OUT="$(cat "$f")"
   rm -f "$f"
+  # A verify command can fail while printing nothing at all (`false` is the common
+  # case), which would leave the user with an empty explanation. Substitute the exit
+  # status so the report always says something. This is a FALLBACK for genuinely empty
+  # output — the test below proves real output is still propagated verbatim, so this
+  # cannot hide a broken capture.
   if [[ $VERIFY_RC -ne 0 && -z "$VERIFY_OUT" ]]; then
     VERIFY_OUT="verification command exited with status $VERIFY_RC"
   fi
