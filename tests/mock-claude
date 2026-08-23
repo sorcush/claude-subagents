@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Mock of `claude` for harness tests. Mimics `claude -p --output-format stream-json`:
+#   - prints newline-delimited JSON events to stdout
+#   - exits 0 on success, 1 on simulated CLI error
+# Controls (env vars):
+#   MOCK_FAIL_CLI=1     -> print a plain-text error to stderr, exit 1
+#   MOCK_STDERR=<text>  -> also write this text to stderr
+#   MOCK_IS_ERROR=1     -> emit a result event with is_error:true, exit 0
+#   MOCK_SESSION=<id>   -> session_id to emit (default claude-mock-1)
+#   MOCK_RESULT=<text>  -> result text to emit (default "done"; empty stays empty)
+#   MOCK_STREAM=1       -> emit progress events before the terminal result line
+#   MOCK_SLEEP=<secs>   -> stall this long before answering, to exercise timeouts
+#   MOCK_LOG=<path>     -> append "ARGS: $*" (all argv, incl. the prompt) to this file
+set -euo pipefail
+
+if [[ -n "${MOCK_LOG:-}" ]]; then echo "ARGS: $*" >> "$MOCK_LOG"; fi
+if [[ -n "${MOCK_STDERR:-}" ]]; then echo "$MOCK_STDERR" >&2; fi
+if [[ -n "${MOCK_SLEEP:-}" ]]; then sleep "$MOCK_SLEEP"; fi
+if [[ "${MOCK_FAIL_CLI:-0}" == "1" ]]; then
+  echo "claude: simulated CLI failure" >&2
+  exit 1
+fi
+
+session="${MOCK_SESSION:-claude-mock-1}"
+result="${MOCK_RESULT-done}"
+
+printf '{"type":"system","subtype":"init","session_id":"%s","model":"mock"}\n' "$session"
+
+if [[ "${MOCK_STREAM:-0}" == "1" ]]; then
+  printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]},"session_id":"%s"}\n' "$session"
+fi
+
+if [[ "${MOCK_IS_ERROR:-0}" == "1" ]]; then
+  printf '{"type":"result","subtype":"error","is_error":true,"result":"%s","session_id":"%s"}\n' "$result" "$session"
+  exit 0
+fi
+
+printf '{"type":"result","subtype":"success","is_error":false,"result":"%s","session_id":"%s"}\n' "$result" "$session"
+exit 0
