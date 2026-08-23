@@ -94,6 +94,12 @@ git -C "$r" add -A && git -C "$r" commit -q -m ignore
 mkdir -p "$r/node_modules/pkg" && echo lib > "$r/node_modules/pkg/index.js"
 mkdir -p "$r/build-cache" && echo junk > "$r/build-cache/j"
 echo "SECRET=1" > "$r/.env"
+# Secrets nested INSIDE a dependency tree must not reach the worktree. Before this was
+# fixed, node_modules/some-pkg/.env and id_rsa.pem were both copied.
+mkdir -p "$r/node_modules/some-pkg"
+echo "NPM_TOKEN=shhh" > "$r/node_modules/some-pkg/.env"
+echo "key"           > "$r/node_modules/some-pkg/id_rsa.pem"
+echo "real code"     > "$r/node_modules/some-pkg/index.js"
 out=$(cd "$r" && bash "$SCRIPT" prepare 2>/dev/null); wt=$(echo "$out" | jq -r '.worktree')
 check "node_modules was copied"          "1" "$([[ -f "$wt/node_modules/pkg/index.js" ]] && echo 1 || echo 0)"
 check "node_modules is not a symlink"    "1" "$([[ ! -L "$wt/node_modules" ]] && echo 1 || echo 0)"
@@ -101,6 +107,10 @@ check "copied list names node_modules"   "1" \
   "$(echo "$out" | jq -r '.copied|index("node_modules")|if . == null then 0 else 1 end')"
 check "an ignored folder off the list is skipped" "1" "$([[ ! -e "$wt/build-cache" ]] && echo 1 || echo 0)"
 check ".env is never copied"             "1" "$([[ ! -e "$wt/.env" ]] && echo 1 || echo 0)"
+check "nested .env is not copied"  "1" "$([[ ! -e "$wt/node_modules/some-pkg/.env" ]] && echo 1 || echo 0)"
+check "nested .pem is not copied"  "1" "$([[ ! -e "$wt/node_modules/some-pkg/id_rsa.pem" ]] && echo 1 || echo 0)"
+check "ordinary files still copied" "real code" "$(cat "$wt/node_modules/some-pkg/index.js" 2>/dev/null)"
+check "purged count reported"      "2" "$(echo "$out" | jq -r '.purged_secrets')"
 
 # --- remove ---
 r=$(new_repo r-remove)
@@ -109,6 +119,8 @@ echo change > "$wt/f.txt"
 git -C "$wt" add -A && git -C "$wt" commit -q -m "task 1"
 out=$(cd "$r" && bash "$SCRIPT" remove 2>/dev/null)
 check "refuses to remove unmerged work" "REFUSED" "$(echo "$out" | jq -r '.status')"
+check "refusal emits one JSON line" "1" "$(printf '%s' "$out" | grep -c '')"
+check "refusal emits valid JSON"    "1" "$(printf '%s' "$out" | jq -e . >/dev/null 2>&1 && echo 1 || echo 0)"
 check "lists the unmerged commit"       "1" \
   "$(echo "$out" | jq -r '[.unmerged[]|select(test("task 1"))]|length|if . > 0 then 1 else 0 end')"
 check "worktree still exists"           "1" "$([[ -d "$wt" ]] && echo 1 || echo 0)"
@@ -139,6 +151,8 @@ out=$(cd "$r" && bash "$SCRIPT" prepare 2>/dev/null); wt=$(echo "$out" | jq -r '
 echo keepme > "$wt/untracked-user-file.txt"
 out=$(cd "$r" && bash "$SCRIPT" remove 2>/dev/null); rc=$?
 check "refuses rather than deleting a user file" "REFUSED" "$(echo "$out" | jq -r '.status')"
+check "refusal emits one JSON line" "1" "$(printf '%s' "$out" | grep -c '')"
+check "refusal emits valid JSON"    "1" "$(printf '%s' "$out" | jq -e . >/dev/null 2>&1 && echo 1 || echo 0)"
 check "refusal exits non-zero"                   "1"        "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
 check "the user's file still exists"             "keepme"   "$(cat "$wt/untracked-user-file.txt" 2>/dev/null)"
 check "the worktree was not destroyed"           "1"        "$([[ -d "$wt" ]] && echo 1 || echo 0)"

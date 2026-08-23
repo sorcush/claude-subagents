@@ -102,7 +102,27 @@ neutralize_symlinks() {
   echo "$removed"
 }
 
+# purge_denied <dir> — delete anything inside <dir> whose BASENAME matches a deny
+# pattern. Echoes how many it removed.
+#
+# DENY_GLOBS used to be checked only against the top-level names in DEP_LIST, none of
+# which can match a pattern like `.env*` — so it was dead code and nothing filtered the
+# CONTENTS of a copied tree. Verified before this fix: node_modules/some-pkg/.env and
+# id_rsa.pem were both copied into the worktree and exposed to the external tool.
+purge_denied() {
+  local dir="$1" removed=0 g victim
+  for g in "${DENY_GLOBS[@]}"; do
+    while IFS= read -r victim; do
+      [[ -n "$victim" ]] || continue
+      rm -rf "$victim"
+      removed=$((removed+1))
+    done < <(find "$dir" -name "$g" -print 2>/dev/null)
+  done
+  echo "$removed"
+}
+
 denied() {
+  # Top-level guard only; nested secret filtering is done by purge_denied.
   local name="$1" g
   for g in "${DENY_GLOBS[@]}"; do
     # shellcheck disable=SC2053
@@ -150,7 +170,7 @@ cmd_prepare() {
   # Carry forward what an earlier prepare copied. Rewriting this from an empty
   # list on a reuse would lose the record, and `remove` would then leave those
   # folders behind and fail on the untracked files it did not know about.
-  local copied=() skipped=() neutralized=0 d entries removed
+  local copied=() skipped=() neutralized=0 purged=0 d entries removed
   if [[ -r "$manifest" ]]; then
     while IFS= read -r d; do [[ -n "$d" ]] && copied+=("$d"); done < "$manifest"
   fi
@@ -174,6 +194,7 @@ cmd_prepare() {
     if clone_dir "$ROOT/$d" "$WT/$d"; then
       removed="$(neutralize_symlinks "$WT/$d")"
       neutralized=$(( neutralized + removed ))
+      purged=$(( purged + $(purge_denied "$WT/$d") ))
       copied+=("$d")
     else
       rm -rf "${WT:?}/$d"
@@ -191,11 +212,13 @@ cmd_prepare() {
   jq -nc --arg wt "$WT" --arg work "$WORK" --arg feature "$FEATURE" \
          --arg copied "$(IFS=,; echo "${copied[*]:-}")" \
          --arg skipped "$(IFS=,; echo "${skipped[*]:-}")" \
-         --argjson neutralized "$neutralized" --argjson cloned "$can_clone" \
+         --argjson neutralized "$neutralized" --argjson purged "$purged" \
+         --argjson cloned "$can_clone" \
     '{status:"READY", worktree:$wt, work_branch:$work, feature_branch:$feature,
       copied:($copied|split(",")|map(select(length>0))),
       skipped:($skipped|split(",")|map(select(length>0))),
-      neutralized_symlinks:$neutralized, clone_supported:($cloned == 1)}'
+      neutralized_symlinks:$neutralized, purged_secrets:$purged,
+      clone_supported:($cloned == 1)}'
 }
 
 cmd_remove() {
@@ -222,6 +245,8 @@ cmd_remove() {
   gd="$(wt_git_dir)"
   manifest="$gd/csc-copied"
   if [[ -r "$manifest" ]]; then
+    # Remove each listed dependency folder whole, not only the files prepare copied —
+    # acceptable because these are disposable caches.
     while IFS= read -r d; do
       [[ -n "$d" ]] || continue
       rm -rf "${WT:?}/$d"

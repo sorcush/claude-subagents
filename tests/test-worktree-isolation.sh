@@ -69,9 +69,13 @@ while IFS= read -r l; do
 done < <(find "$wt/node_modules" -type l 2>/dev/null)
 check "no surviving link resolves outside the worktree" "0" "$escapes"
 
-# THE POINT, stated as an attack: the main checkout secret must be unreachable.
-echo "PWNED" > "$wt/node_modules/abs-escape/key.txt" 2>/dev/null || true
-check "secret in the main checkout is untouched" "TOPSECRET" "$(cat "$r/secret/key.txt")"
+# Independent of symlink neutralisation: the copied tree must be a real copy, so
+# writing through the internal .bin link that we deliberately KEPT must not reach the
+# main checkout. If clone_dir ever regressed to linking rather than copying, this
+# fails even though every escaping link was still removed correctly.
+echo "MODIFIED BY CODER" > "$wt/node_modules/.bin/tool"
+check "writing through a KEPT internal link does not reach main" "ORIGINAL" \
+  "$(cat "$r/node_modules/pkg/index.js")"
 
 # THE POINT: writing in the worktree must not reach the main checkout.
 echo "MODIFIED BY CODER" > "$wt/node_modules/pkg/index.js"
