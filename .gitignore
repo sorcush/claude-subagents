@@ -1,2 +1,9 @@
 .DS_Store
 *.tmp
+
+# Scratch workspace for subagent-driven development runs: briefs, reports and
+# review diffs. Never part of the repository. The skill drops its own ignore
+# file inside .superpowers/sdd/, but that only covers that one subdirectory and
+# disappears with it — this rule covers the whole tree, which matters because
+# the delegator subagents commit with `git add -A`.
+.superpowers/
