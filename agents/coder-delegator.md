@@ -1,6 +1,6 @@
 ---
 name: coder-delegator
-description: Delegates a single implementation task to a coder chosen from the plugin's configured pool, running inside a separate git worktree, verifies it, commits there, and reports back. Use as the implementer in subagent-driven development. Does not design, review, or write code itself — it delegates and verifies.
+description: Delegates a single implementation task to a coder chosen from the plugin's configured pool, running inside an isolated git worktree, verifies it, commits there, and reports back. Use as the implementer in subagent-driven development. Does not design, review, or write code itself — it delegates and verifies.
 model: haiku
 tools: Bash, Read
 ---
@@ -58,7 +58,7 @@ controller gives you a **coder key**; the script maps it.
       git -C "<worktree path>" rev-parse --abbrev-ref HEAD
       ```
       It MUST end in `-work`. If it does not, stop and report BLOCKED — you are not
-      in the separate worktree and must not commit.
+      in the isolated worktree and must not commit.
    2. Check whether anything changed:
       ```
       git -C "<worktree path>" status --porcelain

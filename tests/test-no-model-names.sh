@@ -32,14 +32,23 @@ while IFS= read -r v; do
 done <<< "$values"
 
 # The commands must ask the pool at run time rather than hardcoding a list.
+# Match the REAL invocation, which quotes the script path:
+#   bash "${CLAUDE_PLUGIN_ROOT}/scripts/pool.sh" list reviewers
+# A plain 'pool.sh list reviewers' pattern does NOT match that, and previously passed
+# only because a prose sentence happened to contain the unquoted phrase. Verified:
+# deleting the real invocation and keeping the prose still gave PASS=18 FAIL=0.
 check "review.md builds its menu from pool.sh" "1" \
-  "$(grep -c 'pool.sh list reviewers' "$REPO/commands/review.md")"
+  "$(grep -cE 'scripts/pool\.sh"?[[:space:]]+list[[:space:]]+reviewers' "$REPO/commands/review.md")"
 check "implement-plans.md builds its menu from pool.sh" "1" \
-  "$(grep -c 'pool.sh list coders' "$REPO/commands/implement-plans.md")"
+  "$(grep -cE 'scripts/pool\.sh"?[[:space:]]+list[[:space:]]+coders' "$REPO/commands/implement-plans.md")"
 
 # The old tool-specific commands must be gone.
 for f in cursor-review.md codex-review.md cursor-implement-plans.md; do
   check "removed commands/$f" "1" "$([[ ! -e "$REPO/commands/$f" ]] && echo 1 || echo 0)"
+done
+
+for f in cursor-coder-delegator.md cursor-reviewer-delegator.md codex-reviewer-delegator.md; do
+  check "removed agents/$f" "1" "$([[ ! -e "$REPO/agents/$f" ]] && echo 1 || echo 0)"
 done
 
 echo "---"
