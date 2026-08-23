@@ -1,7 +1,7 @@
 {
   "name": "cursor-subagent-cc",
   "description": "Delegate implementation and independent design or plan review to a configurable pool of external models, run through Cursor, Codex or Claude, while Claude Code plans, decides and reviews.",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "author": {
     "name": "Andrey Sloutsman"
   },

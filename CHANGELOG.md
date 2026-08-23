@@ -31,6 +31,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `-c sandbox_mode="read-only"`.
 - The verify command ran in the caller's directory rather than the coder's.
 
+## [2.1.0] - 2026-08-23
+
+### Added
+- add cx-delegate.sh — Codex CLI delegate for the review script trio
+- add codex-reviewer-delegator agent and /codex-review command
+- reviewer and coder pool files with a validating library
+- portable bounded execution helper with process-group cleanup
+- harness layer for cursor, codex and claude, plus probe.sh
+- generic review delegate over the reviewer pool
+- generic code delegate that works inside a worktree
+- worktree lifecycle with copy-on-write dependency cloning
+- model-agnostic reviewer and coder delegator subagents
+- model-agnostic /review and /implement-plans commands
+- **BREAKING:** remove sync-models machinery and the tool-specific commands
+
+### Changed
+- log cursor-coder delegation effectiveness for the changelog/model-config run
+- add design spec for the Codex/GPT-5.6 Sol reviewer
+- fix codex-reviewer spec per independent Cursor/Grok review
+- log codex-reviewer spec review effectiveness
+- add implementation plan for the Codex/GPT-5.6 Sol reviewer
+- guard the Codex reviewer's dynamic --model probes against hardcoded regressions
+- document the Codex reviewer in README and e2e-smoke.md
+- normalize Codex reviewer descriptions/markers via sync-models.sh
+- design spec for reviewer and coder pools
+- confirm real model ids in the pools spec
+- revise pools spec after Codex review
+- log the Codex review of the pools spec
+- revise pools spec after second Codex review
+- log the second Codex review round
+- implementation plan for reviewer and coder pools
+- revise plan and spec after the Codex plan review
+- log the third Codex review round
+- pre-flight scan fixes to the pools plan
+- harden review-delegate failure and spec-file validation checks
+- strengthen code-delegate verify output and session id checks
+- delegation effectiveness log for the pools implementation
+- make all test files executable and ignore the SDD scratch tree
+
+### Fixed
+- make sync-models.sh's regen_markers a three-way dispatch
+- sync-models.sh was silently stripping +x off delegate scripts
+- optimize pool.sh performance with single-pass validation and add safety tests
+- add zombie check to timeout guard and document untested cases
+- complete task 3 mocks and harden progress-event probe test
+- harden harness contract for codex, cursor, and classifier
+- purge nested secrets in copied dependency folders
+- tighten pool.sh guard and restore isolated worktree wording
+- harden worktree isolation and harness probe/coder behavior
+
 ## [1.2.0] - 2026-07-18
 
 ### Added
