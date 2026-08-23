@@ -34,10 +34,15 @@ harness_is_ready() {
 harness_classify() {
   local t="$1"
   case "$t" in
-    *"Authentication required"*|*"not logged in"*|*"Unauthorized"*|*"401"*|*"login"*) echo auth ;;
-    *"Workspace Trust"*|*"not trusted"*|*"trust"*)                                     echo trust ;;
-    *"command not found"*|*"No such file or directory"*)                               echo not-installed ;;
-    *"Cannot use this model"*|*"unknown model"*|*"model not found"*|*"invalid model"*) echo bad-model ;;
-    *)                                                                                  echo other ;;
+    *"Authentication required"*|*"not logged in"*|*"Not logged in"*|*"Unauthorized"*|*"HTTP 401"*|*"status 401"*)
+      echo auth ;;
+    *"Workspace Trust"*|*"workspace is not trusted"*|*"Trust Required"*)
+      echo trust ;;
+    *"command not found"*|*"executable not found"*|*"is not recognized as"*)
+      echo not-installed ;;
+    *"Cannot use this model"*|*"unknown model"*|*"model not found"*|*"invalid model"*|*"Unsupported model"*)
+      echo bad-model ;;
+    *)
+      echo other ;;
   esac
 }

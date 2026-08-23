@@ -33,7 +33,7 @@ harness_probe() {
   trap "rm -f '$out'" RETURN
   run_with_timeout "${CSC_PROBE_TIMEOUT:-120}" \
     "$CSC_CURSOR_BIN" -p --force --trust --mode ask --output-format stream-json --model "$model" \
-    "Reply with the single word READY." >"$out" 2>>"$ERR_FILE"
+    "Reply with the single word READY." >"$out" 2>>"$ERR_FILE" </dev/null
   rc=$?
   if [[ $rc -eq "$TIMEOUT_EXIT" ]]; then PROBE_REASON="timeout"; return 1; fi
   if [[ $rc -ne 0 ]]; then
@@ -68,7 +68,7 @@ harness_run() {
   cmd+=("$prompt")
 
   # cursor-agent has no working-folder flag, so enter $dir ourselves.
-  ( cd "$dir" && run_with_timeout "${CSC_RUN_TIMEOUT:-1800}" "${cmd[@]}" ) \
+  ( cd "$dir" && run_with_timeout "${CSC_RUN_TIMEOUT:-1800}" "${cmd[@]}" </dev/null ) \
     >"$outfile" 2>>"$ERR_FILE"
   rc=$?
 

@@ -46,7 +46,7 @@ harness_probe() {
 
 harness_run() {
   local mode="$1" model="$2" dir="$3" prompt="$4" sess="$5"
-  local outfile rc line type itype turn_failed="" fail_msg=""
+  local outfile rc line type itype turn_failed="" fail_msg="" got_answer=""
   : > "$ERR_FILE"
   outfile=$(mktemp)
   SESSION_ID=""
@@ -81,6 +81,7 @@ harness_run() {
         itype=$(jq -r '.item.type // ""' <<<"$line" 2>/dev/null)
         if [[ "$itype" == "agent_message" ]]; then
           RESULT=$(jq -r '.item.text // ""' <<<"$line" 2>/dev/null)
+          got_answer=1
         else
           harness_render "$line"
         fi
@@ -102,5 +103,12 @@ harness_run() {
   fi
   if [[ -n "$turn_failed" ]]; then echo "$fail_msg" > "$ERR_FILE"; return 1; fi
   [[ $rc -ne 0 ]] && return 1
+  # cursor.sh and claude.sh both reject a response with no final result line. Codex
+  # must reject the same shape, or a truncated stream reads as success with an empty
+  # RESULT and the three harnesses stop being interchangeable.
+  if [[ -z "$got_answer" ]]; then
+    echo "codex produced no agent_message; the stream ended without an answer" >> "$ERR_FILE"
+    return 1
+  fi
   return 0
 }

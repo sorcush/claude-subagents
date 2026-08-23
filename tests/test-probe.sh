@@ -87,6 +87,17 @@ out=$(MOCK_FAIL_CLI=1 MOCK_STDERR="Workspace Trust Required" \
       bash "$SCRIPT" --role reviewer --key c-cursor 2>/dev/null)
 check "trust failure classified" "trust" "$(echo "$out" | jq -r '.reason')"
 
+# claude's failure branch is its own code, not shared with the other two harnesses,
+# so it needs its own coverage. Without these, a dropped PROBE_REASON in claude.sh
+# would pass the whole suite.
+out=$(MOCK_FAIL_CLI=1 MOCK_STDERR="Authentication required" \
+      bash "$SCRIPT" --role reviewer --key c-claude 2>/dev/null)
+check "claude auth failure detected"   "FAILED" "$(echo "$out" | jq -r '.status')"
+check "claude auth failure classified" "auth"   "$(echo "$out" | jq -r '.reason')"
+
+out=$(MOCK_RESULT="NOTREADY" bash "$SCRIPT" --role reviewer --key c-claude 2>/dev/null)
+check "claude rejects a READY substring" "FAILED" "$(echo "$out" | jq -r '.status')"
+
 CSC_CURSOR_BIN=/no/such/binary bash "$SCRIPT" --role reviewer --key c-cursor >/dev/null 2>&1
 check "missing binary exits non-zero" "1" "$([[ $? -ne 0 ]] && echo 1 || echo 0)"
 out=$(CSC_CURSOR_BIN=/no/such/binary bash "$SCRIPT" --role reviewer --key c-cursor 2>/dev/null)
