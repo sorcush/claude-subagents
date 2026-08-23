@@ -115,10 +115,11 @@ has "claude resume stays read-only" "dontAsk" "$log"
 rm -f "$log"
 
 # --- failures ---
-out=$(MOCK_FAIL_CLI=1 run --reviewer r-codex --target spec 2>/dev/null)
+out=$(MOCK_FAIL_CLI=1 MOCK_STDERR="boom-sentinel-4711" \
+      run --reviewer r-codex --target spec 2>/dev/null)
 check "tool failure is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
-check "diagnostic is populated" "1" \
-  "$([[ -n "$(echo "$out" | jq -r '.diagnostic')" ]] && echo 1 || echo 0)"
+check "diagnostic carries the tool's own error" "1" \
+  "$([[ "$(echo "$out" | jq -r '.diagnostic')" == *boom-sentinel-4711* ]] && echo 1 || echo 0)"
 
 out=$(MOCK_RESULT="" run --reviewer r-codex --target spec 2>/dev/null)
 check "empty report is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
@@ -139,6 +140,8 @@ bash "$SCRIPT" --reviewer r-codex --target spec --doc-file /no/such --rubric-dir
 check "missing doc exits 2" "2" "$?"
 run --reviewer r-codex --target spec --rubric-dir /no/such >/dev/null 2>&1
 check "missing rubric dir exits 2" "2" "$?"
+run --reviewer r-codex --target plan --spec-file /no/such/spec.md >/dev/null 2>&1
+check "unreadable --spec-file exits 2" "2" "$?"
 
 rm -rf "$REPO"
 echo "---"
