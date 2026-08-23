@@ -10,7 +10,8 @@
 
 SHELL := /usr/bin/env bash
 PLUGIN_JSON := .claude-plugin/plugin.json
-MODELS_JSON := .claude-plugin/models.json
+REVIEWERS_JSON := .claude-plugin/reviewers.json
+CODERS_JSON := .claude-plugin/coders.json
 
 .PHONY: bump-patch bump-minor bump-major release version models
 
@@ -18,9 +19,10 @@ MODELS_JSON := .claude-plugin/models.json
 version:
 	@jq -r '.version' $(PLUGIN_JSON)
 
-# Pretty-print the current coder/reviewer model mapping.
+# Pretty-print the configured reviewer and coder pools.
 models:
-	@jq . $(MODELS_JSON)
+	@echo "reviewers:"; jq . $(REVIEWERS_JSON)
+	@echo "coders:";    jq . $(CODERS_JSON)
 
 bump-patch:
 	@$(MAKE) --no-print-directory _bump PART=patch
@@ -54,10 +56,9 @@ release:
 	if git diff --quiet && git diff --cached --quiet; then \
 	  echo "nothing to release: working tree clean (did you run a bump target?)" >&2; exit 1; \
 	fi; \
-	scripts/sync-models.sh --check || { \
-	  echo "docs are stale relative to $(MODELS_JSON) — run scripts/sync-models.sh, review the diff, and commit first" >&2; \
-	  exit 1; \
-	}; \
+	for t in tests/test-*.sh; do \
+	  bash "$$t" >/dev/null || { echo "tests failing: $$t" >&2; exit 1; }; \
+	done; \
 	set -o pipefail; \
 	scripts/gen-changelog.sh --version "$$ver" | scripts/update-changelog.sh --version "$$ver"; \
 	git add -A; \

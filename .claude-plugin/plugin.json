@@ -1,7 +1,7 @@
 {
   "name": "cursor-subagent-cc",
-  "description": "Delegate implementation to Cursor's Composer 2.5, and independent design-spec/plan review to Grok 4.5 (high effort, fast) via cursor-agent or GPT-5.6 Sol via the Codex CLI, while Claude/Opus plans, decides, and reviews.",
-  "version": "1.2.0",
+  "description": "Delegate implementation and independent design or plan review to a configurable pool of external models, run through Cursor, Codex or Claude, while Claude Code plans, decides and reviews.",
+  "version": "2.0.0",
   "author": {
     "name": "Andrey Sloutsman"
   },

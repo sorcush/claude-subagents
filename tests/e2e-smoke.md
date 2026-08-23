@@ -1,170 +1,114 @@
-# E2E Smoke Tests (manual — real cursor-agent)
+# E2E Smoke Tests (manual — real tools)
 
-Prereqs: `cursor-agent status` shows logged in.
+Prereqs: install and log in to whichever tools your pool entries use (`cursor-agent`,
+`codex`, `claude`). `jq` and bash 5 on PATH. Plugin loaded (`CLAUDE_PLUGIN_ROOT`
+set).
 
-## Setup
+## Pool listing
+
 ```bash
-tmp=$(mktemp -d)
-cd "$tmp"
-git init -q && git commit -q --allow-empty -m "init"
-printf 'Create a file calc.py with a function add(a, b) that returns a+b. Then create test_calc.py with a pytest test asserting add(2,3)==5.\n' > task.md
+bash "$CLAUDE_PLUGIN_ROOT/scripts/pool.sh" list reviewers
+bash "$CLAUDE_PLUGIN_ROOT/scripts/pool.sh" list coders
 ```
 
-## 1. Happy path (Composer implements, verify passes)
-```bash
-bash "$CLAUDE_PLUGIN_ROOT/scripts/cc-delegate.sh" \
-  --task-file "$tmp/task.md" \
-  --verify-cmd "python -m pytest -q"
-```
-Expect: stdout is one JSON line with `"status":"DONE"`, `"verified":true`,
-`"attempts":0`. `calc.py` and `test_calc.py` now exist; `pytest` passes.
+Expect: JSON with `role` and `entries` arrays matching
+`.claude-plugin/reviewers.json` and `.claude-plugin/coders.json` (keys, labels,
+harness names, default flags).
 
-## 2. Resume fix-loop (force one failure)
-```bash
-# A verify command that fails the first time, passes after the file is corrected.
-printf 'Create greet.py with greet() returning the string "hi".\n' > task2.md
-bash "$CLAUDE_PLUGIN_ROOT/scripts/cc-delegate.sh" \
-  --task-file "$tmp/task2.md" \
-  --verify-cmd 'python -c "import greet; assert greet.greet()==\"hi\""' \
-  --max-retries 3
-```
-Expect: `"status":"DONE"`, `"verified":true`. If Composer's first attempt is
-already correct, `attempts` may be 0 — that's fine; the loop is exercised by test 3.
+## Probe each pool entry
 
-## 3. BLOCKED path (impossible verify)
-```bash
-bash "$CLAUDE_PLUGIN_ROOT/scripts/cc-delegate.sh" \
-  --task-file "$tmp/task.md" \
-  --verify-cmd 'exit 1' \
-  --max-retries 2
-```
-Expect: `"status":"BLOCKED"`, `"verified":false`, `"attempts":2`, exit code 1.
+For every reviewer key in the shipped pool:
 
-## 4. Preflight failure (logged out) — optional
-Temporarily move auth or run in an environment without login; confirm
-`/cursor-implement-plans` stops at preflight with a clear message.
-
-## Cleanup
 ```bash
-rm -rf "$tmp"
+bash "$CLAUDE_PLUGIN_ROOT/scripts/probe.sh" --role reviewer --key <key>
 ```
+
+Expect: `{"status":"READY",...}` for all four reviewers.
+
+For every coder key:
+
+```bash
+bash "$CLAUDE_PLUGIN_ROOT/scripts/probe.sh" --role coder --key <key>
+```
+
+Expect: `{"status":"READY",...}` for both coders.
+
+On `FAILED`, check `reason` (`auth`, `trust`, `not-installed`, `bad-model`,
+`timeout`, `other`) and fix the environment before continuing.
 
 ---
 
-# Reviewer delegation (cr-delegate.sh — <!-- model:reviewer:label -->Grok 4.5 (high effort, fast)<!-- /model:reviewer:label -->)
+## `/review` end to end
 
-Prereqs: `cursor-agent login` done; the probe below returns `READY`:
-```bash
-REVIEWER_MODEL=$(jq -er '.reviewer.id // empty' "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/models.json")
-if [[ -z "$REVIEWER_MODEL" ]]; then
-  echo "error: could not read .reviewer.id from models.json"; exit 2
-fi
-cursor-agent -p --force --trust --mode ask --model "$REVIEWER_MODEL" "Reply READY."
+Run once per reviewer key against a real spec in your repo:
+
+```
+/review spec <path-to-a-real-spec>
 ```
 
-## Setup
-```bash
-tmp=$(mktemp -d); cd "$tmp"
-git init -q && git commit -q --allow-empty -m "init"
-cat > spec.md <<'EOF'
-# Widget Cache Design
-Goal: add an in-memory cache for widget lookups.
-Architecture: a singleton map keyed by widget id, no eviction.
-EOF
+For each run:
+
+1. The command shows a menu built from `pool.sh list reviewers`; pick the entry
+   under test.
+2. Probe passes, then `reviewer-delegator` returns `REVIEWED` with a non-empty
+   report and a `session_id`.
+3. No files in the repo were modified by the review.
+4. The report follows the rubric format (Summary / Strengths / Issues / Verdict).
+
+Repeat with a plan review when you have a plan and its spec:
+
+```
+/review plan <plan-path> <spec-path>
 ```
 
-## R1. Spec review (happy path)
-```bash
-bash "$CLAUDE_PLUGIN_ROOT/scripts/cr-delegate.sh" \
-  --target spec --doc-file "$tmp/spec.md" --lenses backend
-```
-Expect: stdout is ONE JSON line with `"status":"REVIEWED"`, a non-empty `"report"`,
-a real `"session_id"`, and `"lenses":["backend"]`. The report should follow the
-output format (Summary / Strengths / Issues / Verdict) and likely flag the "no
-eviction" unbounded-growth risk. No files in `$tmp` were modified.
+## Re-review with session (Codex read-only)
 
-## R2. Plan review against a spec
-```bash
-cat > plan.md <<'EOF'
-# Widget Cache Implementation Plan
-Task 1: add cache.py with get(id) and set(id, val).
-EOF
-bash "$CLAUDE_PLUGIN_ROOT/scripts/cr-delegate.sh" \
-  --target plan --doc-file "$tmp/plan.md" --spec-file "$tmp/spec.md"
-```
-Expect: `"status":"REVIEWED"`, `"target":"plan"`; the report should note missing
-eviction coverage / thin task decomposition relative to the spec.
+Pick a Codex-backed reviewer (`codex-sol` in the shipped pool). Run a spec review,
+note the `session_id`, then re-run with the same reviewer and pass that session:
 
-## R3. BLOCKED path (logged out)
-Temporarily log out (or unset auth) and re-run command R1. Expect `"status":"BLOCKED"`,
-exit code 1, and a `diagnostic` explaining the auth/trust failure. No fabricated review.
-
-## Cleanup
-```bash
-rm -rf "$tmp"
 ```
+/review spec <same-spec-path>
+```
+
+On re-review, do **not** show the menu again — resume the prior session. Confirm the
+second call also returns `REVIEWED` with the same `session_id`. For Codex entries,
+confirm the resumed run stays read-only (no sandbox escape; the harness passes
+`-c sandbox_mode="read-only"` on resume).
 
 ---
 
-# Codex reviewer delegation (cx-delegate.sh — <!-- model:codex_reviewer:label -->GPT-5.6 Sol<!-- /model:codex_reviewer:label -->)
+## `/implement-plans` on a throwaway plan
 
-Prereqs: `codex login status` shows logged in; the probe below returns `READY`:
-```bash
-CODEX_REVIEWER_MODEL=$(jq -er '.codex_reviewer.id // empty' "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/models.json")
-if [[ -z "$CODEX_REVIEWER_MODEL" ]]; then
-  echo "error: could not read .codex_reviewer.id from models.json"; exit 2
-fi
-codex exec --json -s read-only -m "$CODEX_REVIEWER_MODEL" "Reply with the single word READY." < /dev/null
+On a feature branch with a clean working tree, create a tiny plan (one task, a simple
+verify command) or use an existing small plan.
+
+```
+/implement-plans <plan-path>
 ```
 
-## Setup
-```bash
-tmp=$(mktemp -d); cd "$tmp"
-git init -q && git commit -q --allow-empty -m "init"
-cat > spec.md <<'EOF'
-# Widget Cache Design
-Goal: add an in-memory cache for widget lookups.
-Architecture: a singleton map keyed by widget id, no eviction.
-EOF
-```
+Walk through and confirm:
 
-## R1. Spec review (happy path)
-```bash
-bash "$CLAUDE_PLUGIN_ROOT/scripts/cx-delegate.sh" \
-  --target spec --doc-file "$tmp/spec.md" --lenses backend
-```
-Expect: stdout is ONE JSON line with `"status":"REVIEWED"`, a non-empty `"report"`,
-a real `"session_id"`, and `"lenses":["backend"]`. The report should follow the
-output format (Summary / Strengths / Issues / Verdict) and likely flag the "no
-eviction" unbounded-growth risk. No files in `$tmp` were modified.
+1. **Worktree created** — `worktree.sh prepare` prints `READY` with a sibling
+   `<branch>-work` path; the main checkout is untouched.
+2. **Dependency folders cloned** — if the plan needs `node_modules` or similar, check
+   `copied` in the prepare output; copies are isolated from the main tree.
+3. **Task delegated** — pick a coder from the menu; probe passes; coder-delegator
+   returns `DONE` with a real `session_id` and verified result inside the worktree.
+4. **Fast-forward** — after your review, `git merge --ff-only <work-branch>` brings
+   the commit onto the feature branch.
+5. **Worktree removed** — `worktree.sh remove` succeeds when all work was merged.
 
-## R2. Plan review against a spec
-```bash
-cat > plan.md <<'EOF'
-# Widget Cache Implementation Plan
-Task 1: add cache.py with get(id) and set(id, val).
-EOF
-bash "$CLAUDE_PLUGIN_ROOT/scripts/cx-delegate.sh" \
-  --target plan --doc-file "$tmp/plan.md" --spec-file "$tmp/spec.md"
-```
-Expect: `"status":"REVIEWED"`, `"target":"plan"`; the report should note missing
-eviction coverage / thin task decomposition relative to the spec.
+If `remove` returns `REFUSED`, unmerged commits remain on the work branch — resolve
+before deleting.
 
-## R3. BLOCKED path (logged out)
-Temporarily log out (or unset auth) and re-run command R1. Expect `"status":"BLOCKED"`,
-exit code 1, and a `diagnostic` explaining the failure. No fabricated review.
+## Optional failure paths
 
-## R4. Resume across rounds
-```bash
-SESSION=$(bash "$CLAUDE_PLUGIN_ROOT/scripts/cx-delegate.sh" \
-  --target spec --doc-file "$tmp/spec.md" --lenses backend | jq -r .session_id)
-bash "$CLAUDE_PLUGIN_ROOT/scripts/cx-delegate.sh" \
-  --target spec --doc-file "$tmp/spec.md" --lenses backend --session "$SESSION"
-```
-Expect: second call also returns `"status":"REVIEWED"` and the same `"session_id"`,
-demonstrating `codex exec resume` picks the thread back up.
+- **Probe failure** — log out of one tool and confirm the command stops with clear
+  advice matching the `reason` field.
+- **BLOCKED review** — with auth broken, confirm no fabricated review is returned.
+- **Dirty tree** — confirm `/implement-plans` refuses to start with uncommitted
+  changes.
 
 ## Cleanup
-```bash
-rm -rf "$tmp"
-```
+
+Remove any throwaway branches, worktrees, and temp plans you created for these checks.

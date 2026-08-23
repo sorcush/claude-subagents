@@ -1,58 +1,115 @@
 # cursor-subagent-cc
 
-Two Cursor-backed delegation subagents for the Claude Code / superpowers workflow,
-in one plugin. Claude/Opus stays the controller; Cursor's `cursor-agent` does the
-work that benefits from a different model:
+Delegation subagents for the Claude Code / superpowers workflow. Claude stays the
+controller — it plans, decides, and reviews — while implementation and independent
+design or plan review are handed to workers from configurable pools, each run
+through Cursor, Codex, or Claude.
 
-- **Implementation** is delegated to Cursor's **<!-- model:coder:label -->Composer 2.5<!-- /model:coder:label -->**.
-- **Independent review** of a design spec or plan is delegated to **<!-- model:reviewer:label -->Grok 4.5 (high effort, fast)<!-- /model:reviewer:label -->**
-  via `cursor-agent`, or to **<!-- model:codex_reviewer:label -->GPT-5.6 Sol<!-- /model:codex_reviewer:label -->** via the Codex CLI (`codex exec`) —
-  two independently-sourced reviewers, so the model that authored a doc is never the
-  model that grades it, and you choose which one reviews each time.
+## Model pools
 
-## Subagents & commands
-| Subagent (Haiku) | Command | Delegates to | Role |
-|---|---|---|---|
-| `cursor-coder-delegator` | `/cursor-implement-plans <plan-path>` | <!-- model:coder:label -->Composer 2.5<!-- /model:coder:label --> | Shells to Composer, runs the verify command, loops, commits, reports. No code-editing tools. |
-| `cursor-reviewer-delegator` | `/cursor-review <spec\|plan> <doc-path> [spec-path]` | <!-- model:reviewer:label -->Grok 4.5 (high effort, fast)<!-- /model:reviewer:label --> (read-only) | Runs the review script and relays the report verbatim. Cannot author or judge. |
-| `codex-reviewer-delegator` | `/codex-review <spec\|plan> <doc-path> [spec-path]` | <!-- model:codex_reviewer:label -->GPT-5.6 Sol<!-- /model:codex_reviewer:label --> (read-only) | Runs the Codex delegate script and relays the report verbatim. Cannot author or judge. |
+Models are not hardcoded in commands or agents. Two JSON files in `.claude-plugin/`
+define the pools:
 
-Opus is the controller for both: it plans/authors, dispatches the subagent, then
-reviews (coder) or triages findings via `superpowers:receiving-code-review` (reviewer).
+- **Reviewers** — `.claude-plugin/reviewers.json`
+- **Coders** — `.claude-plugin/coders.json`
+
+Each entry has this shape:
+
+```json
+{
+  "key": "cursor-composer",
+  "label": "Cursor Composer 2.5",
+  "harness": "cursor",
+  "model": "composer-2.5",
+  "default": true
+}
+```
+
+- `key` — opaque identifier passed to the delegate scripts.
+- `label` — what the user sees in the menu.
+- `harness` — which tool runs the model (`cursor`, `codex`, or `claude`).
+- `model` — the model id that harness understands.
+- `default` — optional; marks the recommended entry in the menu.
+
+See the shipped pool files for the current entries. Run `make models` to print both
+pools.
+
+## Subagents and commands
+
+| Subagent | Command | Role |
+|---|---|---|
+| `reviewer-delegator` | `/review <spec\|plan> <doc-path> [spec-path]` | Runs a read-only review and relays the report verbatim. Cannot author or judge. |
+| `coder-delegator` | `/implement-plans <plan-path>` | Shells to a coder in an isolated worktree, runs verify, loops, commits, reports. No code-editing tools. |
+
+Both commands read the pool at run time and **ask which worker to use** before
+dispatching. There are no tool-specific command aliases.
+
+For reviews, the controller triages findings via `superpowers:receiving-code-review`.
+For implementation, the controller follows `superpowers:subagent-driven-development`
+with the coder as the implementer.
+
+## Worktree isolation
+
+When you run `/implement-plans`, the coder works in a sibling git worktree named
+`<feature-branch>-work`, not in your main checkout. After each task passes review,
+reviewed commits are fast-forwarded onto the feature branch.
+
+Dependency folders listed in the worktree script are brought across as isolated
+copies — copy-on-write clones where the filesystem supports them, ordinary copies
+otherwise. Any symlink that would resolve outside the worktree is removed. The main
+checkout is never written to during delegation.
+
+## Usage
+
+**Review a spec or plan** — pick a reviewer when prompted:
+
+```
+/review spec docs/superpowers/specs/2026-01-01-foo-design.md
+/review plan docs/superpowers/plans/2026-01-01-foo.md docs/superpowers/specs/2026-01-01-foo-design.md
+```
+
+At the brainstorming Spec self-review gate and the writing-plans Self-Review gate,
+run `/review` and let the user choose the reviewer. For spec reviews, lenses
+(backend always; frontend/ui when the spec has a UI surface) are selected
+automatically. On re-review, pass the prior `session_id` so the reviewer resumes
+its context.
+
+**Implement a plan** — pick a coder when prompted:
+
+```
+/implement-plans docs/superpowers/plans/2026-01-01-foo.md
+```
+
+Requires a feature branch and a clean working tree. The command creates the
+worktree, delegates each task, fast-forwards after each passing review, and removes
+the worktree when done.
+
+Review is code- and document-based, not visual: external tools cannot render or
+screenshot a UI.
+
+## Adding a model
+
+Add one entry to `.claude-plugin/reviewers.json` or `.claude-plugin/coders.json`.
+No regeneration step — the orchestrator reads the pool at run time.
+
+## Adding a tool
+
+1. Add one file in `scripts/harness/` defining `harness_probe`, `harness_run`, and
+   `harness_render`.
+2. Add a `tests/mock-<tool>` for unit tests.
+3. Add pool entries that reference the new harness name.
 
 ## Requirements
-- `cursor-agent` installed and logged in (`cursor-agent status` / `cursor-agent login`).
-- `codex` CLI installed and logged in (`codex login status` / `codex login`).
-- `jq` and `bash` 5.x on PATH.
-- The **superpowers** plugin installed — both commands plug into its skills
+
+- `cursor-agent`, `codex`, and `claude` on `PATH` and logged in for whichever pool
+  entries you intend to use.
+- `jq` and bash 5.x on `PATH`.
+- The **superpowers** plugin — both commands plug into its skills
   (`subagent-driven-development`, `requesting-code-review`, `receiving-code-review`,
   and the brainstorming / writing-plans gates).
 
-## Usage
-**Implement a plan** (delegates each task to Composer):
-- New plan, same session: at the superpowers execution handoff, pick subagent-driven and run `/cursor-implement-plans <plan-path>`.
-- Prior plan, new session: `/cursor-implement-plans <plan-path>`.
-
-**Review a spec or plan** (delegates to <!-- model:reviewer:label -->Grok 4.5 (high effort, fast)<!-- /model:reviewer:label -->
-or <!-- model:codex_reviewer:label -->GPT-5.6 Sol<!-- /model:codex_reviewer:label -->):
-- Cursor/Grok, spec: `/cursor-review spec docs/superpowers/specs/2026-01-01-foo-design.md`
-- Codex/GPT-5.6 Sol, spec: `/codex-review spec docs/superpowers/specs/2026-01-01-foo-design.md`
-- Cursor/Grok, plan vs spec: `/cursor-review plan docs/superpowers/plans/2026-01-01-foo.md docs/superpowers/specs/2026-01-01-foo-design.md`
-- Codex/GPT-5.6 Sol, plan vs spec: `/codex-review plan docs/superpowers/plans/2026-01-01-foo.md docs/superpowers/specs/2026-01-01-foo-design.md`
-
-Where it fits the superpowers flow: at the brainstorming Spec self-review gate and the
-writing-plans Self-Review gate, **ask the user which reviewer to use** — Cursor/Grok or
-Codex/GPT-5.6 Sol — then run `/cursor-review spec|plan ...` or `/codex-review spec|plan
-...` accordingly. This is a documentation convention (the superpowers skills themselves
-aren't edited); an explicit `/cursor-review` or `/codex-review` invocation is already
-the user's choice and needs no extra prompt. For spec reviews both commands
-auto-select review **lenses** (backend always; frontend/ui when the spec has a UI
-surface).
-
-Review is code- and document-based, not visual: neither `cursor-agent` nor `codex` can
-render or screenshot a UI.
-
 ## Installing
+
 This repo hosts a Claude Code marketplace named **`qc-point`**. Install is two steps —
 register the marketplace by pointing at the repo that contains it, then install the
 plugin from that marketplace:
@@ -68,36 +125,49 @@ plugin from that marketplace:
 ```
 
 ## Updating an installed plugin
+
 Git-backed marketplaces do **not** auto-refresh by default:
+
 ```
 /plugin marketplace update qc-point     # refresh the cached marketplace
 ```
+
 Claude Code then detects the newer `version` from `plugin.json` and updates the
 installed plugin (you may be prompted to `/reload-plugins` or restart). To update
 automatically on startup, enable auto-update for the `qc-point` marketplace in the
 `/plugin` UI → **Marketplaces** tab.
 
 ## Releasing a new version (maintainers)
+
 Version lives in `.claude-plugin/plugin.json` and follows semver. Because the
 `version` field is what installed users pin to, **every release must bump it**.
 The `Makefile` automates the flow:
+
 ```
 make bump-patch    # 1.0.0 -> 1.0.1   (backward-compatible fixes)
 make bump-minor    # 1.0.1 -> 1.1.0   (new features, backward-compatible)
 make bump-major    # 1.1.0 -> 2.0.0   (breaking changes)
 make release       # commit the bump as "release: vX.Y.Z" and push to origin
 make version       # print the current version
+make models        # print the reviewer and coder pools
 ```
+
 `make release` refuses to run on a clean working tree, so run a bump target first.
+It also runs the full test suite before committing.
 
 ## Tests
+
 ```
-bash tests/test-cc-delegate.sh       # coder delegate unit tests (mock cursor-agent)
-bash tests/test-cr-delegate.sh       # reviewer delegate unit tests (mock cursor-agent)
-bash tests/test-cx-delegate.sh       # Codex reviewer delegate unit tests (mock codex)
+bash tests/test-pool.sh              # pool loading and listing
+bash tests/test-probe.sh             # probe failure classification
+bash tests/test-review-delegate.sh   # reviewer delegate unit tests (mock harnesses)
+bash tests/test-code-delegate.sh     # coder delegate unit tests (mock harnesses)
+bash tests/test-worktree.sh          # worktree prepare/remove lifecycle
+bash tests/test-worktree-isolation.sh # main checkout isolation guarantee
+bash tests/test-timeout.sh           # bounded timeouts on external calls
+bash tests/test-no-model-names.sh    # orchestrator never hardcodes model names
 bash tests/test-gen-changelog.sh     # changelog section generation from commit history
 bash tests/test-update-changelog.sh  # idempotent changelog file writes
-bash tests/test-sync-models.sh       # models.json -> doc regeneration
-bash tests/test-drift-coverage.sh    # guards the dynamic --model probes
 ```
-See `tests/e2e-smoke.md` for the manual end-to-end checks with a real cursor-agent.
+
+See `tests/e2e-smoke.md` for manual end-to-end checks against real tools.

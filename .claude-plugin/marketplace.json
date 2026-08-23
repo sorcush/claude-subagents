@@ -7,7 +7,7 @@
     {
       "name": "cursor-subagent-cc",
       "source": "./",
-      "description": "Delegation subagents: Composer 2.5 for implementation, and independent design/plan review via Grok 4.5 (high effort, fast) (cursor-agent) or GPT-5.6 Sol (Codex CLI)."
+      "description": "Delegation subagents over a configurable pool of coders and reviewers, run through Cursor, Codex or Claude."
     }
   ]
 }
