@@ -59,10 +59,11 @@ write dup-key.json '{"reviewers":[{"key":"a","label":"A","harness":"codex","mode
 write two-defaults.json '{"reviewers":[{"key":"a","label":"A","harness":"codex","model":"m","default":true},{"key":"b","label":"B","harness":"codex","model":"m","default":true}]}'
 write bad-default.json '{"reviewers":[{"key":"a","label":"A","harness":"codex","model":"m","default":"yes"}]}'
 write newline-label.json '{"reviewers":[{"key":"a","label":"A\nB","harness":"codex","model":"m"}]}'
+write extra-toplevel.json '{"reviewers":[{"key":"a","label":"A","harness":"codex","model":"m"}],"extra":1}'
 
 for f in not-json wrong-key not-array empty not-object extra-key no-label bad-key \
          bad-model bad-harness traversal absent-harness dup-key two-defaults \
-         bad-default newline-label; do
+         bad-default newline-label extra-toplevel; do
   check "rejects $f" "2" "$(rc_of "$f.json")"
 done
 
@@ -84,6 +85,13 @@ check "shipped reviewers.json valid" "0" "$(bash "$CLI" list reviewers >/dev/nul
 check "shipped coders.json valid"    "0" "$(bash "$CLI" list coders   >/dev/null 2>&1; echo $?)"
 check "shipped reviewers count"      "4" "$(bash "$CLI" list reviewers | jq '.entries|length')"
 check "shipped coders count"         "2" "$(bash "$CLI" list coders   | jq '.entries|length')"
+
+# Finding 1 of fix round 1: pool_load once ran ~10 jq invocations per entry, which
+# cost 14 seconds for a four-entry file. The whole file is now validated in one pass.
+# Counting call sites is deterministic where a timing assertion would be flaky.
+jq_calls=$(grep -c 'jq ' "$HERE/../scripts/lib/pool.sh")
+check "pool.sh library stays under 6 jq call sites" "1" \
+  "$([[ "$jq_calls" -le 5 ]] && echo 1 || echo 0)"
 
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"

@@ -28,54 +28,88 @@ pool_role_key() {
 
 # pool_load <file> <role> -> validates fully, sets POOL_JSON and POOL_ROLE_KEY.
 # Every failure exits 2 with a message naming the entry and the field.
+#
+# ONE JSON pass does the parsing; bash does the rest. An earlier version ran about
+# ten external validator invocations per entry, which cost 14 seconds for a four-entry file on a
+# machine where the validator sits behind a shim. pool_load runs before every delegation, so
+# that cost lands on every dispatch.
 pool_load() {
-  local file="$1" role="$2" key n i
+  local file="$1" role="$2" key out
   key="$(pool_role_key "$role")"
   POOL_ROLE_KEY="$key"
 
   [[ -r "$file" ]] || pool_die "pool file missing or unreadable: $file"
-  jq -e . "$file" >/dev/null 2>&1 || pool_die "pool file is not valid JSON: $file"
 
-  [[ "$(jq -r 'type' "$file")" == "object" ]] \
-    || pool_die "$file: top level must be a JSON object"
-  [[ "$(jq -r --arg k "$key" '[keys[]|select(. != $k)]|length' "$file")" == "0" ]] \
-    && [[ "$(jq -r --arg k "$key" 'has($k)' "$file")" == "true" ]] \
-    || pool_die "$file: top level must have exactly one key, \"$key\""
-  [[ "$(jq -r --arg k "$key" '.[$k]|type' "$file")" == "array" ]] \
-    || pool_die "$file: .$key must be an array"
+  out="$(jq -r --arg k "$key" '
+    if type != "object" then "ERR top level must be a JSON object"
+    elif ((keys|length) != 1) or (has($k)|not) then "ERR top level must have exactly one key, \"\($k)\""
+    elif (.[$k]|type) != "array" then "ERR .\($k) must be an array"
+    elif (.[$k]|length) == 0 then "ERR .\($k) must not be empty"
+    else
+      .[$k] | to_entries[] |
+      (.key|tostring) as $i | .value as $e |
+      if ($e|type) != "object" then "ERR entry \($i) is not an object"
+      else
+        [ $i,
+          (($e|keys) - ["key","label","harness","model","default"] | join(",")),
+          ($e.key|type),     ($e.key     // "" | tostring),
+          ($e.label|type),   (($e.label|type) == "string" and ($e.label|test("^[ -~]+$"))),
+          ($e.harness|type), ($e.harness // "" | tostring),
+          ($e.model|type),   ($e.model   // "" | tostring),
+          ($e.default|type), ($e.default // false | tostring)
+        ] | @tsv
+      end
+    end
+  ' "$file" 2>/dev/null)" || pool_die "pool file is not valid JSON: $file"
 
-  n="$(jq -r --arg k "$key" '.[$k]|length' "$file")"
-  [[ "$n" -gt 0 ]] || pool_die "$file: .$key must not be empty"
+  case "$out" in
+    "ERR "*) pool_die "$file: ${out#ERR }" ;;
+  esac
 
   local seen_keys="" defaults=0
-  for (( i=0; i<n; i++ )); do
-    local e ekey elabel eharness emodel edefault extra
-    e="$(jq -c --arg k "$key" --argjson i "$i" '.[$k][$i]' "$file")"
-    [[ "$(jq -r 'type' <<<"$e")" == "object" ]] \
-      || pool_die "$file: entry $i is not an object"
+  local line i extra ktype ekey ltype label_ok htype eharness mtype emodel dtype dval
+  local pair f ty cols
 
-    extra="$(jq -r '[keys[]|select(. as $x | ["key","label","harness","model","default"]|index($x)|not)]|join(",")' <<<"$e")"
+  # A while loop fed by a here-string runs in THIS shell, not a subshell, so
+  # pool_die can exit and seen_keys/defaults survive the loop. Do not turn this
+  # into a pipeline.
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+
+    # An "ERR ..." line can also appear per-entry (a non-object entry).
+    case "$line" in
+      ERR*) pool_die "$file: ${line#ERR }" ;;
+    esac
+
+    # Bash read drops empty tab-separated fields; awk preserves them.
+    mapfile -t cols < <(awk -F'\t' '{for (i=1; i<=12; i++) print (i<=NF ? $i : "")}' <<<"$line")
+    i="${cols[0]}"
+    extra="${cols[1]}"
+    ktype="${cols[2]}"
+    ekey="${cols[3]}"
+    ltype="${cols[4]}"
+    label_ok="${cols[5]}"
+    htype="${cols[6]}"
+    eharness="${cols[7]}"
+    mtype="${cols[8]}"
+    emodel="${cols[9]}"
+    dtype="${cols[10]}"
+    dval="${cols[11]}"
+
     [[ -z "$extra" ]] || pool_die "$file: entry $i has unknown field(s): $extra"
 
-    for f in key label harness model; do
-      [[ "$(jq -r --arg f "$f" 'has($f)' <<<"$e")" == "true" ]] \
-        || pool_die "$file: entry $i is missing required field '$f'"
-      [[ "$(jq -r --arg f "$f" '.[$f]|type' <<<"$e")" == "string" ]] \
-        || pool_die "$file: entry $i field '$f' must be a string"
+    for pair in "key:$ktype" "label:$ltype" "harness:$htype" "model:$mtype"; do
+      f="${pair%%:*}"
+      ty="${pair#*:}"
+      [[ "$ty" != "null" ]] || pool_die "$file: entry $i is missing required field '$f'"
+      [[ "$ty" == "string" ]] || pool_die "$file: entry $i field '$f' must be a string"
     done
 
-    ekey="$(jq -r '.key' <<<"$e")"
-    elabel="$(jq -r '.label' <<<"$e")"
-    eharness="$(jq -r '.harness' <<<"$e")"
-    emodel="$(jq -r '.model' <<<"$e")"
-
-    [[ "$ekey"     =~ ^[a-z0-9][a-z0-9-]*$ ]]   || pool_die "$file: entry $i key '$ekey' must match ^[a-z0-9][a-z0-9-]*$"
-    [[ "$eharness" =~ ^[a-z][a-z0-9-]*$ ]]      || pool_die "$file: entry $i harness '$eharness' must match ^[a-z][a-z0-9-]*$"
-    [[ "$emodel"   =~ ^[A-Za-z0-9._+-]+$ ]]     || pool_die "$file: entry $i model '$emodel' must match ^[A-Za-z0-9._+-]+$"
-    [[ -n "$elabel" ]]                          || pool_die "$file: entry $i label must not be empty"
-    [[ "$elabel" != *$'\n'* ]]                  || pool_die "$file: entry $i label must not contain a newline"
-    LC_ALL=C grep -q '[^ -~]' <<<"$elabel" \
-      && pool_die "$file: entry $i label '$elabel' must be printable ASCII"
+    [[ "$ekey"     =~ ^[a-z0-9][a-z0-9-]*$ ]] || pool_die "$file: entry $i key '$ekey' must match ^[a-z0-9][a-z0-9-]*$"
+    [[ "$eharness" =~ ^[a-z][a-z0-9-]*$ ]]    || pool_die "$file: entry $i harness '$eharness' must match ^[a-z][a-z0-9-]*$"
+    [[ "$emodel"   =~ ^[A-Za-z0-9._+-]+$ ]]   || pool_die "$file: entry $i model '$emodel' must match ^[A-Za-z0-9._+-]+$"
+    [[ "$label_ok" == "true" ]] \
+      || pool_die "$file: entry $i label must be non-empty printable ASCII on a single line"
 
     [[ -r "$POOL_HARNESS_DIR/$eharness.sh" ]] \
       || pool_die "$file: entry $i harness file not found: $POOL_HARNESS_DIR/$eharness.sh"
@@ -85,12 +119,12 @@ pool_load() {
     esac
     seen_keys="$seen_keys $ekey"
 
-    if [[ "$(jq -r 'has("default")' <<<"$e")" == "true" ]]; then
-      edefault="$(jq -r '.default|type' <<<"$e")"
-      [[ "$edefault" == "boolean" ]] || pool_die "$file: entry $i field 'default' must be a boolean"
-      [[ "$(jq -r '.default' <<<"$e")" == "true" ]] && defaults=$((defaults+1))
-    fi
-  done
+    case "$dtype" in
+      null)    ;;
+      boolean) [[ "$dval" == "true" ]] && defaults=$((defaults+1)) ;;
+      *)       pool_die "$file: entry $i field 'default' must be a boolean" ;;
+    esac
+  done <<< "$out"
 
   [[ "$defaults" -le 1 ]] || pool_die "$file: at most one entry may be marked default (found $defaults)"
 
@@ -107,16 +141,13 @@ pool_list_json() {
 
 # pool_get <key> -> sets ENTRY_KEY/ENTRY_LABEL/ENTRY_HARNESS/ENTRY_MODEL.
 pool_get() {
-  local want="$1" e
-  e="$(jq -c --arg role "$POOL_ROLE_KEY" --arg k "$want" \
-        '.[$role][]|select(.key == $k)' <<<"$POOL_JSON")"
-  if [[ -z "$e" ]]; then
-    local valid
+  local want="$1" row valid
+  row="$(jq -r --arg role "$POOL_ROLE_KEY" --arg k "$want" \
+        '[ .[$role][] | select(.key == $k) | .key, .label, .harness, .model ] | @tsv' \
+        <<<"$POOL_JSON")"
+  if [[ -z "$row" ]]; then
     valid="$(jq -r --arg role "$POOL_ROLE_KEY" '[.[$role][].key]|join(", ")' <<<"$POOL_JSON")"
     pool_die "unknown key '$want'. Valid keys: $valid"
   fi
-  ENTRY_KEY="$(jq -r '.key' <<<"$e")"
-  ENTRY_LABEL="$(jq -r '.label' <<<"$e")"
-  ENTRY_HARNESS="$(jq -r '.harness' <<<"$e")"
-  ENTRY_MODEL="$(jq -r '.model' <<<"$e")"
+  IFS=$'\t' read -r ENTRY_KEY ENTRY_LABEL ENTRY_HARNESS ENTRY_MODEL <<< "$row"
 }
