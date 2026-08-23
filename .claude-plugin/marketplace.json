@@ -5,7 +5,7 @@
   },
   "plugins": [
     {
-      "name": "cursor-subagent-cc",
+      "name": "claude-subagents",
       "source": "./",
       "description": "Delegation subagents over a configurable pool of coders and reviewers, run through Cursor, Codex or Claude."
     }

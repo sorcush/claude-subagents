@@ -1,4 +1,4 @@
-# Release tooling for cursor-subagent-cc.
+# Release tooling for claude-subagents.
 # Version lives in .claude-plugin/plugin.json and follows semver (MAJOR.MINOR.PATCH).
 #
 #   make bump-patch   # 0.1.0 -> 0.1.1
