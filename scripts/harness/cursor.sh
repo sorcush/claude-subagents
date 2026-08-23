@@ -40,6 +40,16 @@ harness_probe() {
     PROBE_REASON="$(harness_classify "$(cat "$ERR_FILE" 2>/dev/null)")"
     return 1
   fi
+  # These tools can exit 0 and still report failure inside the result line — that is
+  # how a bad model id arrives. Without this, harness_classify never runs and the user
+  # is told the wrong thing to fix.
+  local is_err
+  is_err=$(jq -r 'select(.type=="result") | .is_error // false' "$out" 2>/dev/null | tail -1)
+  if [[ "$is_err" == "true" ]]; then
+    PROBE_REASON="$(harness_classify "$(jq -r 'select(.type=="result") | .result // ""' "$out" 2>/dev/null | tail -1)")"
+    cat "$out" >> "$ERR_FILE"
+    return 1
+  fi
   # Compare the tool's actual answer, not the raw stream.
   local answer
   answer=$(jq -r 'select(.type=="result") | .result // ""' "$out" 2>/dev/null | tail -1)

@@ -89,8 +89,13 @@ resolve_link() (
 # Links that resolve back inside the copied directory are kept: node_modules/.bin
 # entries normally point within node_modules and are needed for tests to run.
 neutralize_symlinks() {
-  local dir="$1" removed=0 l abs
-  dir="$(cd "$dir" && pwd -P)"
+  local dir="$1" removed=0 l abs real
+  real="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
+  case "$real/" in
+    "$WT"/*) : ;;
+    *) echo "refusing to operate outside the worktree: $real" >&2; return 0 ;;
+  esac
+  dir="$real"
   while IFS= read -r l; do
     [[ -n "$l" ]] || continue
     abs="$(resolve_link "$l")"
@@ -110,7 +115,13 @@ neutralize_symlinks() {
 # CONTENTS of a copied tree. Verified before this fix: node_modules/some-pkg/.env and
 # id_rsa.pem were both copied into the worktree and exposed to the external tool.
 purge_denied() {
-  local dir="$1" removed=0 g victim
+  local dir="$1" removed=0 g victim real
+  real="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
+  case "$real/" in
+    "$WT"/*) : ;;
+    *) echo "refusing to operate outside the worktree: $real" >&2; return 0 ;;
+  esac
+  dir="$real"
   for g in "${DENY_GLOBS[@]}"; do
     while IFS= read -r victim; do
       [[ -n "$victim" ]] || continue
@@ -182,6 +193,16 @@ cmd_prepare() {
     [[ -e "$ROOT/$d" ]] || continue
     denied "$d" && continue
     git -C "$ROOT" check-ignore -q "$d" || continue
+    # A symlinked dependency folder cannot be safely copied: `cp -R` copies the LINK,
+    # which would put a door back into the user's files inside the worktree, `find`
+    # does not descend into it so purge_denied would silently skip the tree, and
+    # resolving through it makes neutralize_symlinks delete files outside the
+    # worktree. Verified: writing in the worktree changed the user's real file.
+    # Skipping is reported to the user, who can decide what to do.
+    if [[ -L "$ROOT/$d" ]]; then
+      skipped+=("$d")
+      continue
+    fi
     [[ -e "$WT/$d" ]] && continue
 
     if [[ $can_clone -eq 0 ]]; then
@@ -233,7 +254,7 @@ cmd_remove() {
   if ! git -C "$ROOT" merge-base --is-ancestor "$WORK" "$FEATURE"; then
     local unmerged
     unmerged="$(git -C "$ROOT" log --oneline "$FEATURE..$WORK" | jq -R . | jq -sc .)"
-    jq -nc --arg work "$WORK" --argjson unmerged "$unmerged" \
+    jq -nc --arg work "$WORK" --argjson unmerged "${unmerged:-[]}" \
       '{status:"REFUSED", work_branch:$work, unmerged:$unmerged,
         diagnostic:"work branch has commits not on the feature branch; nothing was deleted"}'
     return 1
@@ -249,6 +270,14 @@ cmd_remove() {
     # acceptable because these are disposable caches.
     while IFS= read -r d; do
       [[ -n "$d" ]] || continue
+      # The manifest lives under the worktree's git dir, which the external coder can
+      # write to. Never feed an unvalidated name to rm -rf: verified that "../VICTIM"
+      # deleted a file outside the worktree. Accept only a plain name that is also a
+      # known dependency folder.
+      [[ "$d" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "ignoring suspicious manifest entry: $d" >&2; continue; }
+      local known=0 k
+      for k in "${DEP_LIST[@]}"; do [[ "$k" == "$d" ]] && known=1 && break; done
+      [[ "$known" -eq 1 ]] || { echo "ignoring unknown manifest entry: $d" >&2; continue; }
       rm -rf "${WT:?}/$d"
     done < "$manifest"
   fi

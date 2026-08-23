@@ -90,7 +90,7 @@ check "BLOCKED exits 1" "1" "$?"
 # --- edit mode is requested, not read-only ---
 log="$TMP/args.log"
 MOCK_LOG="$log" run --coder c-codex --verify-cmd "true" >/dev/null 2>&1
-check "codex coder is not read-only" "0" "$(grep -c -- '-s read-only' "$log")"
+check "codex coder requests write access" "1" "$(grep -c -- '-s workspace-write' "$log")"
 check "codex coder gets -C worktree" "1" "$(grep -c -- "-C $WT" "$log")"
 rm -f "$log"
 

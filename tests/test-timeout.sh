@@ -67,19 +67,22 @@ sleep 300
 SPAWN
 chmod +x "$TMP/spawner.sh"
 
-run_with_timeout 1 "$TMP/spawner.sh" "$TMP/grandchild.pid"
+run_with_timeout 3 "$TMP/spawner.sh" "$TMP/grandchild.pid"
 gc=$(cat "$TMP/grandchild.pid" 2>/dev/null || echo "")
 check "grandchild pid was recorded" "1" "$([[ -n "$gc" ]] && echo 1 || echo 0)"
 
-# `kill -0` alone is not proof: it also succeeds for a zombie that has exited but
-# not been reaped. Poll for the process to disappear, with a bound so a real
-# failure still fails instead of hanging.
-gone=0
-for _ in $(seq 1 50); do
-  if ! ps -p "$gc" -o stat= 2>/dev/null | grep -qv '^[[:space:]]*Z'; then gone=1; break; fi
-  sleep 0.2
-done
-check "grandchild is really gone, not just unsignalable" "1" "$gone"
+# Without this guard, an empty $gc makes `ps -p ""` nondeterministic on macOS and the
+# check below becomes a coin flip instead of a failure.
+if [[ -z "$gc" ]]; then
+  check "grandchild is really gone, not just unsignalable" "1" "0"
+else
+  gone=0
+  for _ in $(seq 1 50); do
+    if ! ps -p "$gc" -o stat= 2>/dev/null | grep -qv '^[[:space:]]*Z'; then gone=1; break; fi
+    sleep 0.2
+  done
+  check "grandchild is really gone, not just unsignalable" "1" "$gone"
+fi
 
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"

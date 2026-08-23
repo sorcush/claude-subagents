@@ -54,14 +54,19 @@ harness_run() {
 
   local -a cmd
   if [[ -n "$sess" ]]; then
-    # VERIFIED 2026-08-22: `codex exec resume` has NO -C and NO -s/--sandbox.
-    # Without the -c override below, a resumed read-only call would fall back
-    # to the user's config.toml sandbox and could gain WRITE access.
     cmd=("$CSC_CODEX_BIN" exec resume "$sess" --json -m "$model")
-    [[ "$mode" == "read-only" ]] && cmd+=(-c 'sandbox_mode="read-only"')
+    if [[ "$mode" == "read-only" ]]; then
+      cmd+=(-c 'sandbox_mode="read-only"')
+    else
+      cmd+=(-c 'sandbox_mode="workspace-write"')
+    fi
   else
     cmd=("$CSC_CODEX_BIN" exec --json -C "$dir" -m "$model")
-    [[ "$mode" == "read-only" ]] && cmd+=(-s read-only)
+    if [[ "$mode" == "read-only" ]]; then
+      cmd+=(-s read-only)
+    else
+      cmd+=(-s workspace-write)
+    fi
   fi
   cmd+=("$prompt")
 

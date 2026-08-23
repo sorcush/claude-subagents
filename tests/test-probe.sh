@@ -110,6 +110,17 @@ check "failed probe exits non-zero" "1" "$([[ $? -ne 0 ]] && echo 1 || echo 0)"
 bash "$SCRIPT" --role reviewer --key nosuch >/dev/null 2>&1
 check "unknown key exits 2" "2" "$?"
 
+# A bad model id must be reported as bad-model for EVERY harness — it is the only
+# reason that sends the user to the pool file rather than to a login prompt.
+for k in c-cursor c-claude; do
+  out=$(MOCK_IS_ERROR=1 MOCK_RESULT="Cannot use this model: nope" \
+        bash "$SCRIPT" --role reviewer --key "$k" 2>/dev/null)
+  check "$k reports bad-model" "bad-model" "$(echo "$out" | jq -r '.reason')"
+done
+out=$(MOCK_TURN_FAILED=1 MOCK_STDERR="Cannot use this model: nope" \
+      bash "$SCRIPT" --role reviewer --key c-codex 2>/dev/null)
+check "c-codex reports bad-model" "bad-model" "$(echo "$out" | jq -r '.reason')"
+
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

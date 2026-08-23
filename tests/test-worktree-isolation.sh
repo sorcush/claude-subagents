@@ -90,6 +90,27 @@ rm -f "$wt/node_modules/pkg/index.js"
 check "deleting in the worktree does not delete in main" "1" \
   "$([[ -f "$r/node_modules/pkg/index.js" ]] && echo 1 || echo 0)"
 
+# A symlinked dependency folder must be skipped, not copied. Copying it would place a
+# symlink in the worktree pointing at the user's real files. Verified before this fix:
+# a write inside the worktree changed the user's real file.
+r2="$ROOT/app2"; mkdir -p "$r2" "$ROOT/shared/pkg"
+echo "REAL" > "$ROOT/shared/pkg/index.js"
+git -C "$r2" init -q -b main
+git -C "$r2" config user.email t@example.com; git -C "$r2" config user.name Test
+printf 'node_modules\n' > "$r2/.gitignore"
+echo hi > "$r2/README.md"
+git -C "$r2" add -A && git -C "$r2" commit -q -m init
+git -C "$r2" checkout -q -b feature/sym
+ln -s "$ROOT/shared" "$r2/node_modules"
+out2=$(cd "$r2" && bash "$SCRIPT" prepare 2>/dev/null)
+wt2=$(echo "$out2" | jq -r '.worktree')
+check "symlinked dep is skipped, not copied" "1" \
+  "$(echo "$out2" | jq -r '.skipped|index("node_modules")|if . == null then 0 else 1 end')"
+check "no symlinked dep lands in the worktree" "1" \
+  "$([[ ! -e "$wt2/node_modules" ]] && echo 1 || echo 0)"
+echo "TRY" > "$wt2/node_modules/pkg/index.js" 2>/dev/null || true
+check "user's real file is untouched" "REAL" "$(cat "$ROOT/shared/pkg/index.js")"
+
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

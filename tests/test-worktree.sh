@@ -169,6 +169,17 @@ check "reuse still reports the copied folder" "1" \
 out=$(cd "$r" && bash "$SCRIPT" remove 2>/dev/null)
 check "remove works after a reuse" "REMOVED" "$(echo "$out" | jq -r '.status')"
 
+# The manifest is writable by the coder through $WT/.git, so remove must never feed it
+# unvalidated to rm -rf. Verified before this fix: "../VICTIM" deleted a file outside
+# the worktree.
+r=$(new_repo r-manifest-evil)
+out=$(cd "$r" && bash "$SCRIPT" prepare 2>/dev/null); wt=$(echo "$out" | jq -r '.worktree')
+echo "DO NOT DELETE" > "$(dirname "$wt")/VICTIM"
+printf '../VICTIM\n' > "$(git -C "$wt" rev-parse --absolute-git-dir)/csc-copied"
+(cd "$r" && bash "$SCRIPT" remove >/dev/null 2>&1)
+check "manifest traversal is refused" "1" \
+  "$([[ -f "$(dirname "$wt")/VICTIM" ]] && echo 1 || echo 0)"
+
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
