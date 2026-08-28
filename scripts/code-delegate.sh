@@ -88,7 +88,20 @@ VERIFY_RC=0
 VERIFY_OUT=""
 run_verify() {
   local f; f=$(mktemp)
-  ( cd "$CWD" && eval "$VERIFY_CMD" ) >"$f" 2>&1
+  if [[ -n "${CSC_VERIFY_HOME:-}" ]]; then
+    [[ "$CSC_VERIFY_HOME" = /* && -d "$CSC_VERIFY_HOME" ]] || {
+      rm -f "$f"
+      VERIFY_RC=2
+      VERIFY_OUT="invalid CSC_VERIFY_HOME"
+      return
+    }
+    ( cd "$CWD" && env -i \
+        HOME="$CSC_VERIFY_HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
+        LANG="${LANG:-C}" LC_ALL="${LC_ALL:-}" USER="${USER:-}" SHELL="$BASH" \
+        "$BASH" -c "$VERIFY_CMD" ) >"$f" 2>&1
+  else
+    ( cd "$CWD" && eval "$VERIFY_CMD" ) >"$f" 2>&1
+  fi
   VERIFY_RC=$?
   VERIFY_OUT="$(cat "$f")"
   rm -f "$f"

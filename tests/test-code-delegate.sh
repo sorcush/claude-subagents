@@ -64,6 +64,60 @@ out=$(cd "$TMP" && bash "$SCRIPT" --task-file "$task" --cwd "$WT" \
       --coder c-codex --verify-cmd "pwd > $TMP/verify-cwd.txt" 2>/dev/null)
 check "verify ran in the worktree" "$WT" "$(cat "$TMP/verify-cwd.txt" 2>/dev/null)"
 
+# --- optional verification-home isolation ---
+# The unset case must preserve legacy inherited-environment behavior. The set
+# case must expose only the minimal explicitly supplied environment.
+caller_home="$TMP/caller-home"
+verify_home="$TMP/verify-home"
+provided_tmpdir="$TMP/provided-tmpdir"
+mkdir -p "$caller_home" "$verify_home" "$provided_tmpdir"
+chmod 700 "$verify_home"
+printf 'caller credential\n' > "$caller_home/credential.txt"
+provided_path="/csc-isolation-bin:$PATH"
+provided_lang="C"
+provided_user="csc-isolation-user"
+provided_shell="$BASH"
+unset_snapshot="$TMP/verify-env-unset.txt"
+set_snapshot="$TMP/verify-env-set.txt"
+
+# Capture values inside the verification shell, not from the delegate process.
+capture_env_cmd() {
+  local destination="$1"
+  printf 'printf "HOME=%%s\\nAZURE_OPENAI_API_KEY=%%s\\nPATH=%%s\\nTMPDIR=%%s\\nLANG=%%s\\nUSER=%%s\\nSHELL=%%s\\nCREDENTIAL=%%s\\n" "$HOME" "${AZURE_OPENAI_API_KEY+present}" "$PATH" "$TMPDIR" "$LANG" "$USER" "$SHELL" "$(if [[ -f "$HOME/credential.txt" ]]; then printf present; else printf absent; fi)" > %q' "$destination"
+}
+
+env_value() { grep "^$1=" "$2" | cut -d= -f2-; }
+
+out=$(unset CSC_VERIFY_HOME; HOME="$caller_home" AZURE_OPENAI_API_KEY="caller-secret" \
+      PATH="$provided_path" TMPDIR="$provided_tmpdir" LANG="$provided_lang" \
+      USER="$provided_user" SHELL="$provided_shell" \
+      run --coder c-codex --verify-cmd "$(capture_env_cmd "$unset_snapshot")" 2>/dev/null)
+check "unset verify home preserves caller HOME" "$caller_home" "$(env_value HOME "$unset_snapshot")"
+check "unset verify home can access caller credential" "present" "$(env_value CREDENTIAL "$unset_snapshot")"
+
+out=$(CSC_VERIFY_HOME="$verify_home" HOME="$caller_home" AZURE_OPENAI_API_KEY="caller-secret" \
+      PATH="$provided_path" TMPDIR="$provided_tmpdir" LANG="$provided_lang" \
+      USER="$provided_user" SHELL="$provided_shell" \
+      run --coder c-codex --verify-cmd "$(capture_env_cmd "$set_snapshot")" 2>/dev/null)
+check "isolated verify home is CSC_VERIFY_HOME" "$verify_home" "$(env_value HOME "$set_snapshot")"
+check "isolated verify omits Azure OpenAI key" "" "$(env_value AZURE_OPENAI_API_KEY "$set_snapshot")"
+check "isolated verify retains supplied PATH" "$provided_path" "$(env_value PATH "$set_snapshot")"
+check "isolated verify retains supplied TMPDIR" "$provided_tmpdir" "$(env_value TMPDIR "$set_snapshot")"
+check "isolated verify retains supplied LANG" "$provided_lang" "$(env_value LANG "$set_snapshot")"
+check "isolated verify retains supplied USER" "$provided_user" "$(env_value USER "$set_snapshot")"
+check "isolated verify supplies Bash as SHELL" "$provided_shell" "$(env_value SHELL "$set_snapshot")"
+check "isolated verify cannot access caller credential" "absent" "$(env_value CREDENTIAL "$set_snapshot")"
+
+out=$(CSC_VERIFY_HOME="relative-home" run --coder c-codex --verify-cmd "true" --max-retries 0 2>/dev/null)
+check "relative CSC_VERIFY_HOME is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+check "invalid CSC_VERIFY_HOME reports its cause" "invalid CSC_VERIFY_HOME" \
+  "$(echo "$out" | jq -r '.verify_output')"
+
+out=$(CSC_VERIFY_HOME="$TMP/missing-verify-home" run --coder c-codex --verify-cmd "true" --max-retries 0 2>/dev/null)
+check "missing CSC_VERIFY_HOME is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+check "missing CSC_VERIFY_HOME reports its cause" "invalid CSC_VERIFY_HOME" \
+  "$(echo "$out" | jq -r '.verify_output')"
+
 # --- retry loop ---
 cnt="$TMP/attempts"; echo 0 > "$cnt"
 vc="n=\$(cat $cnt); n=\$((n+1)); echo \$n > $cnt; [ \$n -ge 3 ]"
