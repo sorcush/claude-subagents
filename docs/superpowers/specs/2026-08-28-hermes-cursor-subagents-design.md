@@ -372,7 +372,8 @@ trims leading and trailing punctuation, substitutes `branch` when the result is
 empty, and truncates to 80 characters before adding the suffix. A clean
 registered worktree may be reused only when its stored original feature branch
 and run ID match the current request. A path or branch collision from a
-different original feature branch fails. When `CSC_RUN_ID` is unset, current Claude naming and reuse
+different original feature branch fails. Run-scoped removal performs the same
+identity check before deleting the worktree or branch. When `CSC_RUN_ID` is unset, current Claude naming and reuse
 behavior is unchanged. Tests must cover two concurrent run IDs and the legacy
 unset path.
 

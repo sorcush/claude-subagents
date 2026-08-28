@@ -142,7 +142,8 @@ Keep all existing removal, dependency-copy, and loss-prevention behavior
 unchanged. Preserve clean reuse for the same original feature branch and run
 ID. Persist the original feature identity in the worktree's private Git
 directory and reject reuse when a different feature branch sanitizes to the
-same slug.
+same slug. Apply the same identity check before run-scoped removal so a
+colliding feature cannot remove another feature's worktree.
 
 - [ ] **Step 4: Test valid, invalid, concurrent, prepare/remove, and legacy paths**
 
