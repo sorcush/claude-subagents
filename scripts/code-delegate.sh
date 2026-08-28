@@ -89,7 +89,7 @@ VERIFY_OUT=""
 run_verify() {
   local f; f=$(mktemp)
   if [[ -n "${CSC_VERIFY_HOME:-}" ]]; then
-    [[ "$CSC_VERIFY_HOME" = /* && -d "$CSC_VERIFY_HOME" ]] || {
+    [[ "$CSC_VERIFY_HOME" = /* && -d "$CSC_VERIFY_HOME" && ! -L "$CSC_VERIFY_HOME" ]] || {
       rm -f "$f"
       VERIFY_RC=2
       VERIFY_OUT="invalid CSC_VERIFY_HOME"

@@ -118,6 +118,19 @@ check "missing CSC_VERIFY_HOME is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.st
 check "missing CSC_VERIFY_HOME reports its cause" "invalid CSC_VERIFY_HOME" \
   "$(echo "$out" | jq -r '.verify_output')"
 
+# A symlink may resolve to a valid directory, but it is not a permitted
+# verification home. The marker proves rejection happens before verification.
+verify_home_symlink="$TMP/verify-home-symlink"
+symlink_verify_marker="$TMP/symlink-verify-ran"
+ln -s "$verify_home" "$verify_home_symlink"
+out=$(CSC_VERIFY_HOME="$verify_home_symlink" run --coder c-codex \
+      --verify-cmd "touch $symlink_verify_marker" --max-retries 0 2>/dev/null)
+check "symlink CSC_VERIFY_HOME is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+check "symlink CSC_VERIFY_HOME reports its cause" "invalid CSC_VERIFY_HOME" \
+  "$(echo "$out" | jq -r '.verify_output')"
+check "symlink CSC_VERIFY_HOME skips verification" "absent" \
+  "$(if [[ -e "$symlink_verify_marker" ]]; then printf present; else printf absent; fi)"
+
 # --- retry loop ---
 cnt="$TMP/attempts"; echo 0 > "$cnt"
 vc="n=\$(cat $cnt); n=\$((n+1)); echo \$n > $cnt; [ \$n -ge 3 ]"
