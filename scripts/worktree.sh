@@ -166,12 +166,22 @@ cmd_prepare() {
   [[ "$FEATURE" != *-work ]] \
     || die "refusing to run on '$FEATURE': it is already a work branch."
 
-  local have_branch=0 have_wt=0
+  local have_branch=0 have_wt=0 gd origin_file origin_feature
   branch_exists "$WORK" && have_branch=1
   [[ -e "$WT" ]] && have_wt=1
 
   if [[ $have_branch -eq 1 && $have_wt -eq 1 ]]; then
     wt_registered || die "'$WT' exists but is not this repository's worktree for '$WORK'. Inspect it by hand."
+    if [[ -n "$RUN_ID" ]]; then
+      gd="$(wt_git_dir)" || die "cannot inspect run-scoped worktree '$WT'."
+      origin_file="$gd/csc-origin-feature"
+      [[ -r "$origin_file" ]] \
+        || die "cannot verify the original feature for run-scoped worktree '$WT'. Inspect it by hand."
+      IFS= read -r origin_feature < "$origin_file" \
+        || die "cannot read the original feature for run-scoped worktree '$WT'. Inspect it by hand."
+      [[ "$origin_feature" == "$FEATURE" ]] \
+        || die "run-scoped worktree '$WT' belongs to feature '$origin_feature', not '$FEATURE'."
+    fi
     [[ -z "$(git -C "$WT" status --porcelain 2>/dev/null)" ]] \
       || die "worktree '$WT' has uncommitted changes from an earlier run. Commit, discard, or remove it."
     # Strict on purpose: a clean branch merely DESCENDED from the feature branch
@@ -190,9 +200,14 @@ cmd_prepare() {
   else
     git -C "$ROOT" worktree add -q -b "$WORK" "$WT" "$FEATURE" \
       || die "git worktree add failed"
+    if [[ -n "$RUN_ID" ]]; then
+      gd="$(wt_git_dir)" || die "cannot inspect new run-scoped worktree '$WT'."
+      printf '%s\n' "$FEATURE" > "$gd/csc-origin-feature" \
+        || die "cannot record the original feature for run-scoped worktree '$WT'."
+    fi
   fi
 
-  local gd manifest
+  local manifest
   gd="$(wt_git_dir)"
   manifest="$gd/csc-copied"
 

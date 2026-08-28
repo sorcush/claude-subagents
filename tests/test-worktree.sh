@@ -91,6 +91,20 @@ check "removing one scope preserves the other" "1" \
 out=$(cd "$r" && CSC_RUN_ID=fedcba9876543210 bash "$SCRIPT" remove 2>/dev/null)
 check "remove targets the second run scope" "REMOVED" "$(echo "$out" | jq -r '.status')"
 
+# Different feature names can sanitize to the same run-scoped name. Reuse is
+# valid only when the original feature identity also matches.
+r=$(new_repo r-collision "feature/a")
+out=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare 2>/dev/null)
+collision_wt=$(echo "$out" | jq -r '.worktree')
+(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare >/dev/null 2>&1); same_rc=$?
+check "run-scoped reuse accepts the same original feature" "0" "$same_rc"
+git -C "$r" checkout -q -b feature-a
+(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare >/dev/null 2>&1); collision_rc=$?
+check "run-scoped reuse rejects a sanitized feature collision" "1" \
+  "$([[ $collision_rc -ne 0 ]] && echo 1 || echo 0)"
+check "collision refusal preserves the original worktree" "feature-a-hermes-0123456789abcdef-work" \
+  "$(git -C "$collision_wt" rev-parse --abbrev-ref HEAD)"
+
 # --- legacy happy path with CSC_RUN_ID unset ---
 r=$(new_repo r-ok)
 out=$(cd "$r" && unset CSC_RUN_ID && bash "$SCRIPT" prepare 2>/dev/null)
