@@ -70,6 +70,27 @@ MOCK_STREAM_BYTES=131072 run_cursor edit >/dev/null 2>&1
 check "unset stream limit preserves legacy capture" "0" "$?"
 check "legacy capture still returns terminal result" "done" "$RESULT"
 
+# A real status 125 from Cursor is a legacy command failure when bounded capture
+# is not selected. It must not enter the overflow-only branch or leak its capture.
+legacy_capture_dir="$TMP/legacy-exit-125"
+mkdir "$legacy_capture_dir"
+legacy_stderr="$TMP/legacy-exit-125.stderr"
+: > "$ERR_FILE"
+(
+  unset CSC_STREAM_MAX_BYTES
+  TMPDIR="$legacy_capture_dir" MOCK_STDERR="legacy exit 125" MOCK_EXIT_CODE=125 \
+    run_cursor edit
+) >/dev/null 2>"$legacy_stderr"
+legacy_rc=$?
+check "legacy exit 125 is a structured harness failure" "1" "$legacy_rc"
+check "legacy exit 125 preserves the tool diagnostic" "legacy exit 125" "$(<"$ERR_FILE")"
+check "legacy exit 125 is not labeled stream overflow" "0" \
+  "$([[ "$(<"$ERR_FILE")" == *"stream exceeded"* ]] && echo 1 || echo 0)"
+check "legacy exit 125 does not expand an unset stream limit" "0" \
+  "$([[ "$(<"$legacy_stderr")" == *"unbound variable"* ]] && echo 1 || echo 0)"
+check "legacy exit 125 removes its temporary capture" "0" \
+  "$(compgen -G "$legacy_capture_dir/*" >/dev/null && echo 1 || echo 0)"
+
 # Configured limits reject non-positive and malformed values before launching Cursor.
 for bad in 0 -1 abc 3+3; do
   : > "$ERR_FILE"
@@ -78,6 +99,28 @@ for bad in 0 -1 abc 3+3; do
   check "stream limit '$bad' explains positive integer requirement" "1" \
     "$([[ "$(<"$ERR_FILE")" == *positive\ integer* ]] && echo 1 || echo 0)"
 done
+
+# MOCK_STREAM_BYTES is an exact prefix size. A bound equal to that prefix plus
+# the independently measured terminal result succeeds; one extra prefix byte fails.
+terminal_result_file="$TMP/terminal-result.json"
+MOCK_STREAM_BYTES= "$CSC_CURSOR_BIN" -p --force --trust --approve-mcps \
+  --output-format stream-json --model cursor-model cursor-prompt > "$terminal_result_file"
+terminal_result_bytes=$(wc -c < "$terminal_result_file")
+boundary_prefix_bytes=4096
+exact_stream_limit=$((terminal_result_bytes + boundary_prefix_bytes))
+
+: > "$ERR_FILE"
+CSC_STREAM_MAX_BYTES="$exact_stream_limit" MOCK_STREAM_BYTES="$boundary_prefix_bytes" \
+  run_cursor edit >/dev/null 2>&1
+check "stream exactly at configured limit succeeds" "0" "$?"
+check "exact-limit stream returns terminal result" "done" "$RESULT"
+
+: > "$ERR_FILE"
+CSC_STREAM_MAX_BYTES="$exact_stream_limit" MOCK_STREAM_BYTES="$((boundary_prefix_bytes + 1))" \
+  run_cursor edit >/dev/null 2>&1
+check "stream one byte over configured limit fails" "1" "$?"
+check "one-byte overflow reports configured limit" "1" \
+  "$([[ "$(<"$ERR_FILE")" == *"stream exceeded $exact_stream_limit bytes"* ]] && echo 1 || echo 0)"
 
 # A 64 KiB limit rejects a deterministic 128 KiB stream, reports the bound,
 # and terminates descendants spawned by the Cursor process.

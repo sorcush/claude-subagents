@@ -63,7 +63,7 @@ harness_probe() {
 # Sets SESSION_ID and RESULT. Call as a plain statement, never in $(...).
 harness_run() {
   local mode="$1" model="$2" dir="$3" prompt="$4" sess="$5"
-  local outfile rc line result_line="" is_err sub
+  local outfile rc line result_line="" is_err sub bounded_capture=0
   : > "$ERR_FILE"
   outfile=$(mktemp)
   # Reset before every call. Without this, a failed resume could leave the
@@ -92,6 +92,7 @@ harness_run() {
     fi
     local capture_helper
     capture_helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/run-captured.py"
+    bounded_capture=1
     "$capture_helper" --timeout-seconds "${CSC_RUN_TIMEOUT:-1800}" \
       --max-stdout-bytes "$CSC_STREAM_MAX_BYTES" \
       --stdout-file "$outfile" --stderr-file "$ERR_FILE" --cwd "$dir" -- \
@@ -99,7 +100,7 @@ harness_run() {
     rc=$?
   fi
 
-  if [[ $rc -eq 125 ]]; then
+  if [[ $bounded_capture -eq 1 && $rc -eq 125 ]]; then
     echo "stream exceeded ${CSC_STREAM_MAX_BYTES} bytes" >> "$ERR_FILE"
     rm -f "$outfile"
     return 1

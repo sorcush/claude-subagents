@@ -10,9 +10,11 @@
 #   MOCK_RESULT=<text>  -> result text to emit (default "done"; empty string stays empty)
 #   MOCK_STREAM=1       -> emit progress events before the terminal result line
 #   MOCK_STREAM_TEXT=<text> -> text of the assistant progress event (default "reviewing")
-#   MOCK_STREAM_BYTES=N -> emit exactly N deterministic bytes before the result
+#   MOCK_STREAM_BYTES=N -> emit exactly N deterministic bytes before the result,
+#                          including the terminating newline when N is positive
 #   MOCK_GRANDCHILD_PID_FILE=<path> -> spawn a sleeping descendant and record its pid
 #   MOCK_SLEEP=<secs>   -> stall this long before answering, to exercise timeouts
+#   MOCK_EXIT_CODE=N    -> exit with N before emitting a terminal result
 #   MOCK_LOG=<path>     -> append "ARGS: $*" (all argv, incl. the prompt) to this file
 set -euo pipefail
 
@@ -27,6 +29,7 @@ if [[ "${MOCK_FAIL_CLI:-0}" == "1" ]]; then
   echo "Cannot use this model: simulated error." >&2
   exit 1
 fi
+if [[ -n "${MOCK_EXIT_CODE:-}" ]]; then exit "$MOCK_EXIT_CODE"; fi
 
 session="${MOCK_SESSION-sess-mock-1}"
 # Use ${VAR-default} (not :-) so an explicit empty MOCK_RESULT stays empty.
@@ -36,12 +39,15 @@ if [[ -n "${MOCK_STREAM_BYTES:-}" ]]; then
   printf -v chunk '%4096s' ''
   chunk=${chunk// /x}
   remaining=$MOCK_STREAM_BYTES
-  while (( remaining > 0 )); do
-    (( remaining < ${#chunk} )) && chunk=${chunk:0:remaining}
-    printf '%s' "$chunk"
-    remaining=$((remaining - ${#chunk}))
-  done
-  printf '\n'
+  if (( remaining > 0 )); then
+    remaining=$((remaining - 1))
+    while (( remaining > 0 )); do
+      (( remaining < ${#chunk} )) && chunk=${chunk:0:remaining}
+      printf '%s' "$chunk"
+      remaining=$((remaining - ${#chunk}))
+    done
+    printf '\n'
+  fi
 fi
 
 if [[ "${MOCK_STREAM:-0}" == "1" ]]; then
