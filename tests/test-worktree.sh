@@ -41,18 +41,67 @@ r=$(new_repo r-work "feature/x-work")
 (cd "$r" && bash "$SCRIPT" prepare >/dev/null 2>&1)
 check "refuses on a -work branch" "1" "$([[ $? -ne 0 ]] && echo 1 || echo 0)"
 
-# --- happy path ---
+# --- run-scoped names and validation ---
+r=$(new_repo r-invalid-short)
+before=$(git -C "$r" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+(cd "$r" && CSC_RUN_ID=bad bash "$SCRIPT" prepare >/dev/null 2>&1); rc=$?
+after=$(git -C "$r" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+check "rejects a short run ID" "1" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+check "short run ID creates no branch" "$before" "$after"
+check "short run ID creates no directory" "0" \
+  "$(compgen -G "$ROOT/r-invalid-short-*" >/dev/null && echo 1 || echo 0)"
+
+r=$(new_repo r-invalid-hex)
+before=$(git -C "$r" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+(cd "$r" && CSC_RUN_ID=0123456789abcdeg bash "$SCRIPT" prepare >/dev/null 2>&1); rc=$?
+after=$(git -C "$r" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+check "rejects a non-hex run ID" "1" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+check "non-hex run ID creates no branch" "$before" "$after"
+check "non-hex run ID creates no directory" "0" \
+  "$(compgen -G "$ROOT/r-invalid-hex-*" >/dev/null && echo 1 || echo 0)"
+
+r=$(new_repo r-scoped)
+out1=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare 2>/dev/null); rc1=$?
+wt1=$(echo "$out1" | jq -r '.worktree')
+work1=$(echo "$out1" | jq -r '.work_branch')
+check "accepts a 16-character lowercase hex run ID" "0" "$rc1"
+check "first run branch is scoped" "feature-login-hermes-0123456789abcdef-work" "$work1"
+check "first run directory is scoped" "r-scoped-feature-login-hermes-0123456789abcdef-work" \
+  "$(basename "$wt1")"
+
+out2=$(cd "$r" && CSC_RUN_ID=fedcba9876543210 bash "$SCRIPT" prepare 2>/dev/null); rc2=$?
+wt2=$(echo "$out2" | jq -r '.worktree')
+work2=$(echo "$out2" | jq -r '.work_branch')
+check "accepts a second valid run ID" "0" "$rc2"
+check "second run branch is scoped" "feature-login-hermes-fedcba9876543210-work" "$work2"
+check "second run directory is scoped" "r-scoped-feature-login-hermes-fedcba9876543210-work" \
+  "$(basename "$wt2")"
+check "run IDs create distinct branches" "1" "$([[ "$work1" != "$work2" ]] && echo 1 || echo 0)"
+check "run IDs create distinct worktrees" "1" "$([[ "$wt1" != "$wt2" ]] && echo 1 || echo 0)"
+check "both scoped branches exist" "2" \
+  "$(( $(git -C "$r" show-ref --verify --quiet "refs/heads/$work1" && echo 1 || echo 0) + \
+       $(git -C "$r" show-ref --verify --quiet "refs/heads/$work2" && echo 1 || echo 0) ))"
+check "both scoped worktrees exist" "2" \
+  "$(( $([[ -d "$wt1" ]] && echo 1 || echo 0) + $([[ -d "$wt2" ]] && echo 1 || echo 0) ))"
+
+out=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" remove 2>/dev/null)
+check "remove targets the first run scope" "REMOVED" "$(echo "$out" | jq -r '.status')"
+check "removing one scope preserves the other" "1" \
+  "$([[ ! -d "$wt1" && -d "$wt2" ]] && echo 1 || echo 0)"
+out=$(cd "$r" && CSC_RUN_ID=fedcba9876543210 bash "$SCRIPT" remove 2>/dev/null)
+check "remove targets the second run scope" "REMOVED" "$(echo "$out" | jq -r '.status')"
+
+# --- legacy happy path with CSC_RUN_ID unset ---
 r=$(new_repo r-ok)
-out=$(cd "$r" && bash "$SCRIPT" prepare 2>/dev/null)
+out=$(cd "$r" && unset CSC_RUN_ID && bash "$SCRIPT" prepare 2>/dev/null)
 wt=$(echo "$out" | jq -r '.worktree')
 check "prepare reports READY"        "READY"              "$(echo "$out" | jq -r '.status')"
-check "work branch is named"         "feature/login-work" "$(echo "$out" | jq -r '.work_branch')"
+check "legacy work branch is exact"  "feature/login-work" "$(echo "$out" | jq -r '.work_branch')"
 check "feature branch is echoed"     "feature/login"      "$(echo "$out" | jq -r '.feature_branch')"
 check "worktree folder exists"       "1"                  "$([[ -d "$wt" ]] && echo 1 || echo 0)"
 check "worktree is a sibling"        "1" \
   "$([[ "$(dirname "$wt")" == "$(dirname "$r")" ]] && echo 1 || echo 0)"
-check "slashes became dashes"        "1" \
-  "$([[ "$(basename "$wt")" == *feature-login-work ]] && echo 1 || echo 0)"
+check "legacy worktree folder is exact" "r-ok-feature-login-work" "$(basename "$wt")"
 check "worktree is on the work branch" "feature/login-work" \
   "$(git -C "$wt" rev-parse --abbrev-ref HEAD)"
 check "one JSON line" "1" "$(echo "$out" | wc -l | tr -d ' ')"

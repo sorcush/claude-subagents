@@ -17,9 +17,27 @@ BIG_DIR_ENTRIES=5000
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git repository"
 ROOT="$(cd "$ROOT" && pwd -P)"
 FEATURE="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
-WORK="${FEATURE}-work"
-SLUG="${FEATURE//\//-}"
-WT="$(dirname "$ROOT")/$(basename "$ROOT")-${SLUG}-work"
+RUN_ID="${CSC_RUN_ID:-}"
+if [[ -n "$RUN_ID" && ! "$RUN_ID" =~ ^[a-f0-9]{16}$ ]]; then
+  die "CSC_RUN_ID must match ^[a-f0-9]{16}$"
+fi
+
+sanitize_slug() {
+  local value="$1"
+  value="$(printf '%s' "$value" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/-+/-/g; s/^[._-]+//; s/[._-]+$//')"
+  [[ -n "$value" ]] || value=branch
+  printf '%.80s' "$value"
+}
+
+SLUG="$(sanitize_slug "$FEATURE")"
+if [[ -n "$RUN_ID" ]]; then
+  WORK="${SLUG}-hermes-${RUN_ID}-work"
+  WT="$(dirname "$ROOT")/$(basename "$ROOT")-${SLUG}-hermes-${RUN_ID}-work"
+else
+  WORK="${FEATURE}-work"
+  SLUG="${FEATURE//\//-}"
+  WT="$(dirname "$ROOT")/$(basename "$ROOT")-${SLUG}-work"
+fi
 
 TMP_ERR="$(mktemp)"
 trap 'rm -f "$TMP_ERR"' EXIT
