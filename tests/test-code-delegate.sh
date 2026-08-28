@@ -16,7 +16,7 @@ check() {
   fi
 }
 
-TMP=$(mktemp -d)
+TMP=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$TMP"' EXIT
 
 export CSC_CURSOR_BIN="$HERE/mock-cursor-agent"
@@ -118,18 +118,29 @@ check "missing CSC_VERIFY_HOME is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.st
 check "missing CSC_VERIFY_HOME reports its cause" "invalid CSC_VERIFY_HOME" \
   "$(echo "$out" | jq -r '.verify_output')"
 
-# A symlink may resolve to a valid directory, but it is not a permitted
-# verification home. The marker proves rejection happens before verification.
+# Every spelling that traverses a symlink is invalid, including a direct
+# symlink, a trailing slash, a dot suffix, and an intermediate component. The
+# marker assertions prove the delegate rejects each path before verification.
 verify_home_symlink="$TMP/verify-home-symlink"
-symlink_verify_marker="$TMP/symlink-verify-ran"
+verify_home_parent_symlink="$TMP/verify-home-parent-symlink"
 ln -s "$verify_home" "$verify_home_symlink"
-out=$(CSC_VERIFY_HOME="$verify_home_symlink" run --coder c-codex \
-      --verify-cmd "touch $symlink_verify_marker" --max-retries 0 2>/dev/null)
-check "symlink CSC_VERIFY_HOME is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
-check "symlink CSC_VERIFY_HOME reports its cause" "invalid CSC_VERIFY_HOME" \
-  "$(echo "$out" | jq -r '.verify_output')"
-check "symlink CSC_VERIFY_HOME skips verification" "absent" \
-  "$(if [[ -e "$symlink_verify_marker" ]]; then printf present; else printf absent; fi)"
+ln -s "$TMP" "$verify_home_parent_symlink"
+check_symlink_verify_home_rejected() {
+  local label="$1" home="$2" marker="$TMP/${1// /-}-verify-ran"
+  local out
+  out=$(CSC_VERIFY_HOME="$home" run --coder c-codex \
+        --verify-cmd "touch $marker" --max-retries 0 2>/dev/null)
+  check "$label CSC_VERIFY_HOME is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+  check "$label CSC_VERIFY_HOME reports its cause" "invalid CSC_VERIFY_HOME" \
+    "$(echo "$out" | jq -r '.verify_output')"
+  check "$label CSC_VERIFY_HOME skips verification" "absent" \
+    "$(if [[ -e "$marker" ]]; then printf present; else printf absent; fi)"
+}
+
+check_symlink_verify_home_rejected "direct symlink" "$verify_home_symlink"
+check_symlink_verify_home_rejected "trailing slash symlink" "$verify_home_symlink/"
+check_symlink_verify_home_rejected "dot suffix symlink" "$verify_home_symlink/."
+check_symlink_verify_home_rejected "intermediate symlink" "$verify_home_parent_symlink/verify-home"
 
 # --- retry loop ---
 cnt="$TMP/attempts"; echo 0 > "$cnt"
