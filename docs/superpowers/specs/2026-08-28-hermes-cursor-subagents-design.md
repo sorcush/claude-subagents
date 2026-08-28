@@ -369,8 +369,10 @@ existing worktree script through an optional `CSC_RUN_ID`. The value must match
 `<repo>-<feature-slug-prefix>-hermes-<run_id>-work`. The feature slug replaces
 every character outside `[A-Za-z0-9._-]` with `-`, collapses repeated dashes,
 trims leading and trailing punctuation, substitutes `branch` when the result is
-empty, and truncates to 80 characters before adding the suffix. Existing path or branch collisions fail rather than
-being reused. When `CSC_RUN_ID` is unset, current Claude naming and reuse
+empty, and truncates to 80 characters before adding the suffix. A clean
+registered worktree may be reused only when its stored original feature branch
+and run ID match the current request. A path or branch collision from a
+different original feature branch fails. When `CSC_RUN_ID` is unset, current Claude naming and reuse
 behavior is unchanged. Tests must cover two concurrent run IDs and the legacy
 unset path.
 
