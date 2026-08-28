@@ -105,6 +105,53 @@ check "run-scoped reuse rejects a sanitized feature collision" "1" \
 check "collision refusal preserves the original worktree" "feature-a-hermes-0123456789abcdef-work" \
   "$(git -C "$collision_wt" rev-parse --abbrev-ref HEAD)"
 
+# Run-scoped removal must validate the same original feature identity as reuse.
+r=$(new_repo r-remove-same-feature "feature/a")
+out=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare 2>/dev/null)
+remove_same_wt=$(echo "$out" | jq -r '.worktree')
+remove_same_work=$(echo "$out" | jq -r '.work_branch')
+out=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" remove 2>/dev/null); same_remove_rc=$?
+check "run-scoped removal accepts the same original feature" "0" "$same_remove_rc"
+check "same-feature run-scoped removal reports REMOVED" "REMOVED" "$(echo "$out" | jq -r '.status')"
+check "same-feature run-scoped removal deletes worktree and branch" "1" \
+  "$([[ ! -e "$remove_same_wt" ]] && ! git -C "$r" show-ref --verify --quiet "refs/heads/$remove_same_work" && echo 1 || echo 0)"
+
+r=$(new_repo r-remove-collision "feature/a")
+out=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare 2>/dev/null)
+remove_collision_wt=$(echo "$out" | jq -r '.worktree')
+remove_collision_work=$(echo "$out" | jq -r '.work_branch')
+git -C "$r" checkout -q -b feature-a
+(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" remove >/dev/null 2>&1); collision_remove_rc=$?
+check "run-scoped removal rejects a sanitized feature collision" "1" \
+  "$([[ $collision_remove_rc -ne 0 ]] && echo 1 || echo 0)"
+check "collision removal refusal preserves worktree and branch" "1" \
+  "$([[ -d "$remove_collision_wt" ]] && git -C "$r" show-ref --verify --quiet "refs/heads/$remove_collision_work" && echo 1 || echo 0)"
+
+r=$(new_repo r-remove-missing-origin "feature/a")
+out=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare 2>/dev/null)
+missing_origin_wt=$(echo "$out" | jq -r '.worktree')
+missing_origin_work=$(echo "$out" | jq -r '.work_branch')
+missing_origin_git_dir=$(git -C "$missing_origin_wt" rev-parse --absolute-git-dir)
+rm -f "$missing_origin_git_dir/csc-origin-feature"
+(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" remove >/dev/null 2>&1); missing_origin_rc=$?
+check "run-scoped removal rejects missing origin metadata" "1" \
+  "$([[ $missing_origin_rc -ne 0 ]] && echo 1 || echo 0)"
+check "missing origin refusal preserves worktree and branch" "1" \
+  "$([[ -d "$missing_origin_wt" ]] && git -C "$r" show-ref --verify --quiet "refs/heads/$missing_origin_work" && echo 1 || echo 0)"
+
+r=$(new_repo r-remove-unreadable-origin "feature/a")
+out=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare 2>/dev/null)
+unreadable_origin_wt=$(echo "$out" | jq -r '.worktree')
+unreadable_origin_work=$(echo "$out" | jq -r '.work_branch')
+unreadable_origin_git_dir=$(git -C "$unreadable_origin_wt" rev-parse --absolute-git-dir)
+rm -f "$unreadable_origin_git_dir/csc-origin-feature"
+mkdir "$unreadable_origin_git_dir/csc-origin-feature"
+(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" remove >/dev/null 2>&1); unreadable_origin_rc=$?
+check "run-scoped removal rejects unreadable origin metadata" "1" \
+  "$([[ $unreadable_origin_rc -ne 0 ]] && echo 1 || echo 0)"
+check "unreadable origin refusal preserves worktree and branch" "1" \
+  "$([[ -d "$unreadable_origin_wt" ]] && git -C "$r" show-ref --verify --quiet "refs/heads/$unreadable_origin_work" && echo 1 || echo 0)"
+
 # --- legacy happy path with CSC_RUN_ID unset ---
 r=$(new_repo r-ok)
 out=$(cd "$r" && unset CSC_RUN_ID && bash "$SCRIPT" prepare 2>/dev/null)

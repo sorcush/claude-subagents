@@ -282,6 +282,18 @@ cmd_remove() {
     return 0
   }
 
+  local gd origin_file origin_feature
+  if [[ -n "$RUN_ID" ]]; then
+    gd="$(wt_git_dir)" || die "cannot inspect run-scoped worktree '$WT'."
+    origin_file="$gd/csc-origin-feature"
+    [[ -r "$origin_file" ]] \
+      || die "cannot verify the original feature for run-scoped worktree '$WT'. Inspect it by hand."
+    IFS= read -r origin_feature < "$origin_file" \
+      || die "cannot read the original feature for run-scoped worktree '$WT'. Inspect it by hand."
+    [[ "$origin_feature" == "$FEATURE" ]] \
+      || die "run-scoped worktree '$WT' belongs to feature '$origin_feature', not '$FEATURE'."
+  fi
+
   # Everything below uses `branch -d`, not `-D`. It is safe precisely because
   # this ancestry check has already proved nothing would be lost.
   if ! git -C "$ROOT" merge-base --is-ancestor "$WORK" "$FEATURE"; then
@@ -295,7 +307,7 @@ cmd_remove() {
 
   # Delete ONLY what prepare created. git worktree remove refuses to run while
   # untracked files are present, and the copied dependencies are untracked.
-  local gd manifest d
+  local manifest d
   gd="$(wt_git_dir)"
   manifest="$gd/csc-copied"
   if [[ -r "$manifest" ]]; then
