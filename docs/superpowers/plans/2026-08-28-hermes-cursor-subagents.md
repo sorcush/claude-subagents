@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Target Hermes Agent v0.20.6; older versions have no compatibility claim until tested.
-- Require the `superpowers` plugin in the range `>=6.3.0,<7.0.0`.
+- Declare the `superpowers` plugin dependency in `plugin.yaml` as `>=6.3.0,<7.0.0`; Hermes treats the manifest entry as advisory, and local doctor validates plugins in isolation.
 - Register no model-facing Hermes tools, hooks, providers, or background services.
 - Do not route Cursor through Hermes `delegate_task` or configure Cursor as an inference provider.
 - Store models under `plugins.entries.claude-subagents.settings.coder_model` and `.reviewer_model` with no fallback.
@@ -347,7 +347,7 @@ class FakeContext:
         self.skills.append((name, Path(path), description, dict(frontmatter or {})))
 ```
 
-Assert that `register(FakeContext())` registers exactly `cursor-coder` and `cursor-reviewer`, both paths end in `SKILL.md`, and both descriptions are non-empty. Add malformed-frontmatter and missing-file tests that expect registration failure.
+Assert that `register(FakeContext())` registers exactly `cursor-coder` and `cursor-reviewer`, both paths end in `SKILL.md`, and both descriptions are non-empty. Assert that registration still succeeds when the fake context reports no loaded sibling plugins, matching doctor-style isolation. Assert that `plugin.yaml` declares the advisory `superpowers` dependency. Add malformed-frontmatter and missing-file tests that expect registration failure.
 
 In `tests/test-version-sync.sh`, assert that `jq -r .version .claude-plugin/plugin.json` equals the YAML manifest version read through a short Python `yaml.safe_load` command.
 

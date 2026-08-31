@@ -125,14 +125,22 @@ and a `superpowers` plugin dependency constrained to `>=6.3.0,<7.0.0`. Version 2
 design baseline; the release that introduces Hermes support receives the next
 appropriate semantic version. The supported Hermes baseline is the verified
 v0.20.6 runtime. Older Hermes releases receive no compatibility claim until
-tested.
+tested. Hermes treats `requires_plugins` as an advisory manifest declaration;
+it has no public API for querying another plugin's version.
 
 The root `__init__.py` exports only `register(ctx)`. It parses each Hermes
 skill's frontmatter for metadata and calls `ctx.register_skill(name, path,
 description, frontmatter)`. It registers no tools, hooks, commands, providers,
-or background services. Missing or incompatible `superpowers`, malformed
-frontmatter, a missing skill file, or either failed registration makes plugin
-registration fail closed with a diagnostic naming the dependency or skill.
+or background services. Malformed frontmatter, a missing skill file, or either
+failed registration makes plugin registration fail closed with a diagnostic
+naming the skill. Registration must not call `ctx.has_plugin("superpowers")`:
+`PluginContext.has_plugin()` reports only plugins loaded in the current manager,
+and `hermes plugins doctor <local-path>` validates the target plugin in
+isolation with an empty sibling-plugin graph.
+
+Completed workflow skills must stop before dispatch or review execution when
+required Superpowers skills such as `subagent-driven-development`,
+`receiving-code-review`, or `finishing-a-development-branch` cannot be loaded.
 
 `__init__.py` registers the skills from their Hermes-specific paths. The expected qualified skill names are:
 
