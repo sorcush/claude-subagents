@@ -248,13 +248,19 @@ dispatch.py review --target spec|plan --doc-file <path>
 
 The generated pool keys are exactly `cursor-coder` and `cursor-reviewer`.
 Role and operation values outside the forms above are usage errors.
+Options are action-specific rather than merely ignored: prepare forbids a
+generation, remove requires one, prune forbids all run-scoped options, show
+forbids generation/commit, and only record-integration accepts and requires a
+commit.
 The Hermes controller generates one cryptographically random run ID at workflow
 start and passes that exact value to prepare, probe, every initial or resumed
 dispatch, integration diagnostics, and removal. The wrapper returns the same
 value unchanged. A wrapper invocation never generates a replacement run ID.
-Initial worktree preparation and an initial review create generation 1 and do
-not accept `--expected-generation`. Every later state-mutating operation requires
-the latest generation and returns the incremented value.
+Initial worktree preparation first persists generation 1 in `preparing`, then
+returns generation 2 after the shell result is validated and state reaches
+`prepared`. An initial review creates generation 1. Neither initial operation
+accepts `--expected-generation`; every later state mutation requires the latest
+generation and returns the incremented value.
 
 Exit codes are:
 
@@ -434,6 +440,7 @@ The state record has this schema:
 ```json
 {
   "schema_version": 1,
+  "git_object_format": "sha1",
   "run_id": "0123456789abcdef",
   "role": "coder",
   "state": "reviewing",
@@ -445,8 +452,23 @@ The state record has this schema:
     "worktree": "/absolute/worktree/path",
     "work_branch": "feature-name-hermes-0123456789abcdef-work",
     "pending_commit": null,
-    "last_integrated_commit": "full-git-sha-or-empty",
-    "unintegrated_commits": []
+    "last_integrated_commit": null,
+    "unintegrated_commits": ["1111111111111111111111111111111111111111"],
+    "dispatch_baseline": {
+      "pre_dispatch_work_branch_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pre_dispatch_feature_branch_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "verified_worker_tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "verified_worker_index": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "budget": {
+      "cursor_calls": 2,
+      "controller_review_rounds": 1,
+      "active_worker_seconds": 412.75
+    },
+    "protected_manifest": {
+      "git_control_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "controller_source_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
   },
   "reviewer": null,
   "failure": null,
@@ -467,6 +489,12 @@ Reviewer records use the same common fields with `coder: null` and:
 }
 ```
 
+`git_object_format` is persisted from `git rev-parse --show-object-format`;
+every Git object ID must have that format's exact width. The budget counters
+are cumulative and durable across blocked resumes and controller sessions.
+`protected_manifest` is captured before dispatch and retained on failure so a
+blocked run cannot bless a mutated Git control plane as a new baseline.
+
 All common and role keys are always present. Inapplicable role payloads and
 optional scalar values are JSON `null`; they are never omitted or represented
 as empty strings.
@@ -476,27 +504,47 @@ Every state read-modify-write uses Python's standard-library `fcntl.flock` on
 This avoids depending on a `flock` executable, which macOS does not ship. Every mutation
 requires the generation last returned to the controller and increments it;
 stale generations fail. The lock is process-scoped, so a crashed process
-releases it automatically; pruning removes an unlocked stale lock file with its
-eligible state record. The wrapper owns `prepared` and `dispatching` transitions. The Hermes skill
+releases it automatically. Per-run lock files remain stable and are never
+unlinked, including during pruning, so old and new callers cannot lock different
+inodes for the same run. The wrapper owns `preparing`, `prepared`, and `dispatching`
+transitions. The Hermes skill
 invokes `record-reviewing` before controller review, `record-integration`
 immediately after each successful fast-forward, `block` when execution stops
 with preserved state, and `complete` after safe worktree removal. Updates use a
 mode-0600 temporary file, `fsync`, and atomic rename.
-Allowed transitions begin `prepared -> dispatching -> reviewing`,
+`preparing` contains deterministic repository, feature branch, work branch, and
+worktree identities before `git worktree add` can run. A retry under the same
+run lock reconciles no side effect, a branch-only side effect, a registered
+worktree missing its origin marker, or a fully created worktree before moving
+to `prepared`; ambiguous or moved identities remain preserved and fail closed.
+Allowed transitions begin `preparing -> prepared -> dispatching -> reviewing`,
 `reviewing -> dispatching` for a requested correction,
-`reviewing -> integration_pending -> integrated` for accepted work,
-`integrated -> dispatching` for the next plan task, and `integrated -> complete`
-after final cleanup. Any non-complete state may transition to `blocked`.
+`reviewing -> integration_pending -> integrated` for accepted work and
+`integrated -> dispatching` for the next plan task. Any non-complete state may
+transition to `blocked`. Completion is not a general transition: coder
+completion is persisted only after absence of both its worktree and work branch
+is proved.
 Resumption moves `blocked -> dispatching` only after the wrapper validates the
 stored repository, branch, worktree, run ID, and Cursor session ID.
+`integrated -> dispatching` starts a new task: it clears the previous task's
+Cursor session, call/review/time budgets, protected manifest, and verified
+dispatch identity before capturing the new baseline. Corrections within a task
+retain the same session and use zero internal retries.
 Before fast-forward, the controller records the candidate commit in
-`integration_pending`. Reconciliation is idempotent: if the feature branch
-already contains that candidate, state advances to `integrated`; if it remains
+`integration_pending`. Reconciliation is idempotent only while the candidate is
+the exact work-branch tip with the authorized parent and tree. If the feature
+branch already equals that candidate, state advances to `integrated`; if it remains
 an ancestor of the work branch, the controller may repeat the same
 fast-forward; any divergence blocks. A crash after a controller commit but
-before `record-reviewing` is reconciled by detecting exactly one new commit on
-the unchanged run branch and moving to `reviewing`; any other branch movement
-blocks. A crash while state says `dispatching` compares the recorded pre-dispatch
+before `record-reviewing` is reconciled only when the new commit has exactly
+`pre_dispatch_work_branch_commit` as its parent and exactly
+`verified_worker_tree` as its tree. Missing verified tree/index identity or an
+arbitrary worker-created commit blocks. During `integration_pending`, the
+feature branch may be exactly `pre_dispatch_feature_branch_commit` or exactly
+the authorized pending commit; any other movement blocks. A newer work-branch
+commit blocks even if the feature branch already contains the reviewed pending
+commit. A crash while state
+says `dispatching` compares the recorded pre-dispatch
 manifests with current Git and filesystem state and moves to `blocked` with the
 observed delta. A crash after `record-reviewing` resumes review without another
 implementation dispatch. If worktree removal completed before state
@@ -504,11 +552,15 @@ was marked complete, absence of both the registered worktree and work branch
 reconciles to `complete`. Malformed or mismatched state fails closed and is preserved for diagnosis.
 State updates synchronize both the temporary file and containing directory
 before and after atomic rename.
-Successful runs delete their record after completion. Failed records remain
-until explicit cleanup; `state --action prune` removes only records older than
-30 days whose worktrees no longer exist. Failure messages are redacted and
-capped at 8 KiB; artifact paths must remain below the plugin state or temporary
-review roots. Cursor session IDs are treated as sensitive opaque values. They
+Git object IDs are exactly the repository object format's 40- or 64-hex width;
+the verified index identity is exactly a 64-hex SHA-256 digest. Successful
+completion retains a complete state record as an idempotent
+tombstone. `state --action prune` removes only records older than 30 days whose
+worktrees no longer exist; failed and complete records otherwise remain
+observable. Failure messages are secret- and session-redacted before being
+capped at 8 KiB. Reviewer artifact paths must remain below
+`$HERMES_HOME/claude-subagents/review-artifacts/<run_id>/`. Cursor session IDs
+are treated as sensitive opaque values. They
 may appear in designated structured result and recovery outputs, but never in
 ordinary progress logs or diagnostics.
 
@@ -557,9 +609,11 @@ after the review and fails on a difference. The copied snapshot document path,
 not the controller path, is passed to `scripts/review-delegate.sh`. A reviewer mutation therefore cannot modify the controller
 checkout, although this mechanism cannot prevent effects through configured
 MCP servers or outside the disposable workspace. An unchanged snapshot is
-removed. A changed snapshot is preserved for diagnosis and its path is returned
-with the failure. The external-side-effect risk is accepted for parity with the
-working Claude reviewer.
+removed. A changed or otherwise diagnostic snapshot is preserved under the
+durable profile-scoped
+`$HERMES_HOME/claude-subagents/review-artifacts/<run_id>/` directory, persisted
+atomically in run state, and returned with the failure. The external-side-effect
+risk is accepted for parity with the working Claude reviewer.
 
 The external review recommendation to remove `--approve-mcps` is deliberately
 not adopted because the user selected unchanged reviewer flags. This is a
@@ -572,10 +626,11 @@ documents. The Cursor session ID, document-relative paths, target, lenses, and
 latest snapshot outcome are persisted in the reviewer's run-state record.
 Cursor resume is required to succeed when the prior clone no longer exists and
 the new clone path differs; the real smoke test exercises that condition.
-Reviewer transitions are `dispatching -> reviewed`, `reviewed -> dispatching`
-for re-review, and `reviewed -> complete` when the controller closes the review
-cycle. `dispatching` or `reviewed` may transition to `blocked`. Reviewer records
-do not use coder-only integration states.
+Reviewer transitions are `dispatching -> reviewed` and `reviewed ->
+dispatching` for re-review. `dispatching` or `reviewed` may transition to
+`blocked`. The dedicated completion action accepts only `reviewed` (or an
+existing complete tombstone); it never coerces an active or blocked review.
+Reviewer records do not use coder-only integration states.
 
 ## Structured Result Contracts
 

@@ -60,6 +60,20 @@ check "non-hex run ID creates no branch" "$before" "$after"
 check "non-hex run ID creates no directory" "0" \
   "$(compgen -G "$ROOT/r-invalid-hex-*" >/dev/null && echo 1 || echo 0)"
 
+r=$(new_repo r-expected-identity)
+before=$(git -C "$r" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+(cd "$r" &&
+  CSC_RUN_ID=0123456789abcdef \
+  CSC_EXPECTED_FEATURE=feature/wrong \
+  bash "$SCRIPT" prepare >/dev/null 2>&1)
+rc=$?
+after=$(git -C "$r" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+check "expected feature mismatch is rejected before creation" "1" \
+  "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+check "expected feature mismatch creates no branch" "$before" "$after"
+check "expected feature mismatch creates no directory" "0" \
+  "$(compgen -G "$ROOT/r-expected-identity-*" >/dev/null && echo 1 || echo 0)"
+
 r=$(new_repo r-scoped)
 out1=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare 2>/dev/null); rc1=$?
 wt1=$(echo "$out1" | jq -r '.worktree')

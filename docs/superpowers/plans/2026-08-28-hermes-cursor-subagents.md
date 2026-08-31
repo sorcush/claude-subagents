@@ -550,21 +550,26 @@ Encode the complete coder and reviewer transition tables as dictionaries and tes
 
 ```python
 CODER_TRANSITIONS = {
+    "preparing": {"prepared", "blocked"},
     "prepared": {"dispatching", "blocked"},
     "dispatching": {"reviewing", "blocked"},
     "reviewing": {"dispatching", "integration_pending", "blocked"},
     "integration_pending": {"integrated", "blocked"},
-    "integrated": {"dispatching", "complete", "blocked"},
-    "blocked": {"dispatching", "complete"},
+    "integrated": {"dispatching", "blocked"},
+    "blocked": {"dispatching"},
 }
 REVIEWER_TRANSITIONS = {
     "dispatching": {"reviewed", "blocked"},
-    "reviewed": {"dispatching", "complete", "blocked"},
-    "blocked": {"dispatching", "complete"},
+    "reviewed": {"dispatching", "blocked"},
+    "blocked": {"dispatching"},
 }
 ```
 
-Test stale generation rejection, two simultaneous writers, malformed state, role mismatch, mode `0600`, directory mode `0700`, parent-directory synchronization, global pruning, and pruning refusal while a worktree exists.
+Test stale generation rejection, booleans rejected as generations, timezone-aware
+RFC3339 timestamps, exact common/role/nested key sets, two simultaneous writers,
+malformed state, role mismatch, mode `0600`, directory mode `0700`,
+parent-directory synchronization, complete tombstone retention, global pruning,
+stable lock-file retention, and pruning refusal while a worktree exists.
 
 - [ ] **Step 2: Run state tests and observe failure**
 
@@ -590,14 +595,31 @@ def prune_state(hermes_home: Path, now: datetime) -> list[str]
 ```
 
 `lock_run` is a context manager around `fcntl.flock(fd, LOCK_EX)`. `atomic_write_json` flushes and `os.fsync`s the file, replaces the target with `os.replace`, then opens and `fsync`s the parent directory.
+Completed records remain as idempotent tombstones until the 30-day prune.
+Per-run lock files are never unlinked. The exact coder `dispatch_baseline` keys
+are `pre_dispatch_work_branch_commit`,
+`pre_dispatch_feature_branch_commit`, `verified_worker_tree`, and
+`verified_worker_index`.
 
 - [ ] **Step 4: Add guarded worktree operations**
 
-`worktree prepare` sets `CSC_RUN_ID`, invokes existing `scripts/worktree.sh prepare`, validates its JSON, and creates generation 1. `worktree remove` loads the expected generation, invokes removal with the same run ID, and reconciles absent worktrees and branches idempotently.
+`worktree prepare` first persists deterministic recovery identity as generation
+1 `preparing`, then sets `CSC_RUN_ID`, invokes existing
+`scripts/worktree.sh prepare`, validates its JSON and exact exit status, and
+returns generation 2 `prepared`. Retries reconcile no side effect, branch-only,
+registered-worktree, and post-shell/pre-state-update crash boundaries under the
+same run lock. `worktree remove` holds one run lock across identity/generation
+checks, side effects, and complete-tombstone persistence. It invokes removal
+with the same run ID, reconciles an absent worktree with a remaining branch and
+absence of both, and never fabricates a generation from missing state.
 
 - [ ] **Step 5: Add crash-boundary reconciliation tests**
 
-Cover crashes after worker edits, controller commit, `record-reviewing`, fast-forward before state update, and worktree removal before completion. Each retry must either advance idempotently or return `BLOCKED` with preserved evidence.
+Cover crashes after worker edits, an unauthorized worker commit, an authorized
+controller commit with the exact recorded parent and verified worker tree,
+`record-reviewing`, successful and divergent fast-forward before state update,
+and partial worktree removal. Each retry must either advance idempotently or
+return `BLOCKED` with preserved evidence.
 
 - [ ] **Step 6: Run tests**
 
@@ -669,11 +691,24 @@ git clone --no-local --no-hardlinks --no-checkout <repository> <temporary-path>
 git -C <temporary-path> checkout --detach <controller-head>
 ```
 
-Overlay only the declared document and optional specification. Pass the copied path to `scripts/review-delegate.sh`. Preserve changed snapshots; remove unchanged snapshots.
+Overlay only the declared document and optional specification. Pass the copied
+path to `scripts/review-delegate.sh`. Preserve changed or otherwise diagnostic
+snapshots below
+`$HERMES_HOME/claude-subagents/review-artifacts/<run_id>/`, atomically record
+their outcome/path before returning, and remove unchanged snapshots.
 
 - [ ] **Step 4: Implement exact result and state handling**
 
-Reject empty reports and session IDs. Initial review creates reviewer generation 1. Re-review requires the prior generation and session ID, creates a fresh clone, and transitions `reviewed -> dispatching -> reviewed`. Include `snapshot_path` only for preserved diagnostic snapshots.
+Start one 1,800-second deadline before repository/document preflight and apply
+the remaining budget through clone, checkout, configuration, delegate, parsing,
+mutation checks, and cleanup. Run external children in process groups. Reject
+raw null/list/numeric report and session values before conversion, empty reports,
+and empty session IDs. Initial review rejects session/generation; re-review
+requires and exactly matches both plus every persisted identity field, creates a
+fresh clone, and transitions `reviewed -> dispatching -> reviewed`. Include
+`snapshot_path` only for preserved diagnostic snapshots, preserve legitimate
+delegate `BLOCKED` diagnostics after redaction, and return the actual persisted
+generation on every lifecycle failure.
 
 - [ ] **Step 5: Write the complete reviewer skill**
 
@@ -704,7 +739,8 @@ metadata:
 # Cursor Reviewer
 
 Accept only `spec` or `plan` targets. Resolve and preserve one run ID. Execute
-`${HERMES_SKILL_DIR}/../../scripts/dispatch.py probe --role reviewer` before
+`${HERMES_SKILL_DIR}/../../scripts/dispatch.py probe --role reviewer --run-id
+<run-id>` before
 review. Execute `dispatch.py review` with the document paths, target, lenses,
 run ID, latest generation, and prior Cursor session ID on re-review. Treat any
 non-REVIEWED result, empty report, empty session ID, or snapshot mutation as
@@ -747,6 +783,20 @@ git commit -m "feat: add Hermes Cursor reviewer"
 - `dispatch.py code` requires a non-empty verification command, a valid expected generation, and the exact run-scoped worktree.
 - The external Cursor process may edit files but may not commit or alter Git control-plane state.
 - The Hermes controller owns commits, review, state transitions, and fast-forward integration.
+- State persists the repository object format, original protected-manifest
+  digests, Cursor-call count, controller review-round count, and cumulative
+  active worker seconds. Initial retries are capped at three; corrections use
+  zero retries; task totals are nine calls, five rounds, and five active hours.
+- Protected-state checks include Git's effective absolute or relative
+  `core.hooksPath`. Blocked resumes compare against the original persisted
+  baseline before dispatch.
+- Reconciliation recognizes an integrated candidate only when it remains the
+  exact authorized work-branch tip. A newer work-branch commit blocks even when
+  the feature branch already contains the reviewed candidate.
+- `integrated -> dispatching` resets the prior task's session, three budget
+  counters, protected manifest, and verified baseline. The next plan task uses
+  initial retries and a new session; only same-task corrections use the prior
+  session with zero retries.
 
 - [ ] **Step 1: Add failing coder precondition tests**
 

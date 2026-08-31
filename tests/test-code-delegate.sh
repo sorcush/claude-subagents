@@ -76,7 +76,7 @@ printf 'caller credential\n' > "$caller_home/credential.txt"
 provided_path="/csc-isolation-bin:$PATH"
 provided_lang="C"
 provided_user="csc-isolation-user"
-provided_shell="$BASH"
+provided_shell="$(command -v bash)"
 unset_snapshot="$TMP/verify-env-unset.txt"
 set_snapshot="$TMP/verify-env-set.txt"
 

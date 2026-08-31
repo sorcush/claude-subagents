@@ -38,6 +38,15 @@ else
   SLUG="${FEATURE//\//-}"
   WT="$(dirname "$ROOT")/$(basename "$ROOT")-${SLUG}-work"
 fi
+if [[ -n "${CSC_EXPECTED_FEATURE:-}" && "$FEATURE" != "$CSC_EXPECTED_FEATURE" ]]; then
+  die "feature branch changed before worktree preparation"
+fi
+if [[ -n "${CSC_EXPECTED_WORK_BRANCH:-}" && "$WORK" != "$CSC_EXPECTED_WORK_BRANCH" ]]; then
+  die "work branch identity changed before worktree preparation"
+fi
+if [[ -n "${CSC_EXPECTED_WORKTREE:-}" && "$WT" != "$CSC_EXPECTED_WORKTREE" ]]; then
+  die "worktree path identity changed before worktree preparation"
+fi
 
 TMP_ERR="$(mktemp)"
 trap 'rm -f "$TMP_ERR"' EXIT

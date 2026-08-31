@@ -14,8 +14,20 @@ HERMES_PLUGIN_YAML ?= plugin.yaml
 REVIEWERS_JSON := .claude-plugin/reviewers.json
 CODERS_JSON := .claude-plugin/coders.json
 PYTHON ?= python3
+BASH5 ?= $(shell PYTHONDONTWRITEBYTECODE=1 $(PYTHON) hermes/scripts/dispatch.py runtime --bash-path 2>/dev/null)
 
-.PHONY: bump-patch bump-minor bump-major release version models check-version-sync
+.PHONY: bump-patch bump-minor bump-major release version models check-version-sync check-bash5 test
+
+check-bash5:
+	@test -n "$(BASH5)" && test -x "$(BASH5)" || { echo "Bash 5 or newer is required" >&2; exit 2; }
+	@"$(BASH5)" -c '(( BASH_VERSINFO[0] >= 5 ))' || { echo "BASH5 must execute Bash 5 or newer" >&2; exit 2; }
+
+test: check-bash5 check-version-sync
+	@set -e; bash5_dir=$$(dirname "$(BASH5)"); PATH="$$bash5_dir:$${PATH:-}"; export PATH; \
+	for t in tests/test-*.sh; do \
+	  env -u CSC_CODERS_JSON -u CSC_REVIEWERS_JSON "$(BASH5)" "$$t"; \
+	done
+	@PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
 
 # Current version (e.g. "0.1.0").
 version:
@@ -68,10 +80,10 @@ _bump:
 	  *) echo "unknown PART: $(PART)" >&2; exit 2 ;; \
 	esac; \
 	new="$$MA.$$MI.$$PA"; \
-	json_tmp=$$(mktemp); \
-	yaml_tmp=$$(mktemp); \
-	json_bak=$$(mktemp); \
-	yaml_bak=$$(mktemp); \
+	json_tmp=$$(mktemp "$$(dirname "$(PLUGIN_JSON)")/.plugin.json.tmp.XXXXXX"); \
+	yaml_tmp=$$(mktemp "$$(dirname "$(HERMES_PLUGIN_YAML)")/.plugin.yaml.tmp.XXXXXX"); \
+	json_bak=$$(mktemp "$$(dirname "$(PLUGIN_JSON)")/.plugin.json.bak.XXXXXX"); \
+	yaml_bak=$$(mktemp "$$(dirname "$(HERMES_PLUGIN_YAML)")/.plugin.yaml.bak.XXXXXX"); \
 	cp "$(PLUGIN_JSON)" "$$json_bak"; \
 	json_backup_ready=1; \
 	if [[ "$${CSC_BUMP_FAIL_AFTER_JSON_BACKUP:-}" == "1" ]]; then exit 1; fi; \
@@ -80,7 +92,7 @@ _bump:
 	jq --arg v "$$new" '.version = $$v' "$(PLUGIN_JSON)" > "$$json_tmp"; \
 	awk -v ver="$$new" '/^version:/ {print "version: " ver; next} {print}' "$(HERMES_PLUGIN_YAML)" > "$$yaml_tmp"; \
 	jq -e . "$$json_tmp" >/dev/null; \
-	$(PYTHON) -c 'import sys, yaml; from pathlib import Path; data=yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8")); assert isinstance(data, dict) and isinstance(data.get("version"), str)' "$$yaml_tmp"; \
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -c 'import sys, yaml; from pathlib import Path; data=yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8")); assert isinstance(data, dict) and isinstance(data.get("version"), str)' "$$yaml_tmp"; \
 	json_new=$$(jq -r '.version' "$$json_tmp"); \
 	yaml_new=$$(awk '/^version:/ {print $$2; exit}' "$$yaml_tmp"); \
 	test "$$json_new" = "$$new"; \
@@ -97,14 +109,11 @@ _bump:
 	success=1
 
 # Commit the current version and push. Fails if there is nothing to commit.
-release: check-version-sync
+release: test
 	@ver=$$(jq -r '.version' $(PLUGIN_JSON)); \
 	if git diff --quiet && git diff --cached --quiet; then \
 	  echo "nothing to release: working tree clean (did you run a bump target?)" >&2; exit 1; \
 	fi; \
-	for t in tests/test-*.sh; do \
-	  bash "$$t" >/dev/null || { echo "tests failing: $$t" >&2; exit 1; }; \
-	done; \
 	set -o pipefail; \
 	scripts/gen-changelog.sh --version "$$ver" | scripts/update-changelog.sh --version "$$ver"; \
 	git add -A; \

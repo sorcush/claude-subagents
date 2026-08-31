@@ -47,6 +47,22 @@ fi
 
 check "plugin.json and plugin.yaml versions match" "$json_version" "$yaml_version"
 
+if make -C "$ROOT" --no-print-directory check-bash5 BASH5=/bin/true \
+    >/dev/null 2>&1; then
+  arbitrary_bash_status="accepted"
+else
+  arbitrary_bash_status="rejected"
+fi
+check "test gate rejects arbitrary successful executable" "rejected" "$arbitrary_bash_status"
+
+if grep -Fq 'mktemp "$$(dirname "$(PLUGIN_JSON)")/' "$ROOT/Makefile" &&
+    grep -Fq 'mktemp "$$(dirname "$(HERMES_PLUGIN_YAML)")/' "$ROOT/Makefile"; then
+  replacement_temp_location="same-directory"
+else
+  replacement_temp_location="other"
+fi
+check "replacement manifests use target directories" "same-directory" "$replacement_temp_location"
+
 if [[ -n "$PY" ]]; then
   invalid_yaml="$(mktemp)"
   printf 'version: [\n' > "$invalid_yaml"
