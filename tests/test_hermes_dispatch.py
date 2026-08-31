@@ -2427,6 +2427,10 @@ class AdapterContractTests(unittest.TestCase):
                 )
             self.assertEqual(payload["status"], "BLOCKED")
             self.assertTrue(Path(prepared["worktree"]).exists())
+            preserved = dispatch.load_state(hermes_home, run_id)
+            self.assertEqual(preserved["state"], "prepared")
+            self.assertEqual(preserved["generation"], state["generation"] + 1)
+            self.assertIn("commits not on the feature branch", preserved["failure"])
 
 
 class ReviewDelegatePathTests(unittest.TestCase):

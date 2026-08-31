@@ -24,6 +24,26 @@ from tests.test_hermes_correction import (
 from hermes.scripts import dispatch
 
 
+class VerificationHomeTests(unittest.TestCase):
+    def test_created_verification_home_is_canonical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real_parent = root / "real"
+            real_parent.mkdir()
+            logical_parent = root / "logical"
+            logical_parent.symlink_to(real_parent, target_is_directory=True)
+            created = real_parent / "verify"
+            created.mkdir()
+            with patch.object(
+                dispatch.tempfile,
+                "mkdtemp",
+                return_value=str(logical_parent / "verify"),
+            ):
+                verify_home = dispatch.create_verification_home()
+            self.assertEqual(verify_home, created.resolve())
+            self.assertFalse(any(part.is_symlink() for part in [verify_home, *verify_home.parents]))
+
+
 class CompletionSafetyTests(unittest.TestCase):
     def test_reviewer_completion_rejects_dispatching_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

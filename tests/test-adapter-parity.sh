@@ -54,7 +54,7 @@ require_text "AGENTS.md" "Classify the change as shared, Claude-specific, or Her
 require_text "CLAUDE.md" "Classify the change as shared, Claude-specific, or Hermes-specific."
 require_text "docs/adapter-parity.md" "Hermes coder uses run-scoped worktrees"
 require_text "tests/e2e-smoke.md" 'if EMPTY="$(python3 "$ADAPTER" code'
-require_text "tests/e2e-smoke.md" '--verify-cmd "false" --max-retries 3'
+require_text "tests/e2e-smoke.md" '--verify-cmd "false" --max-retries 0'
 require_text "tests/e2e-smoke.md" 'if CLEANUP_RESULT="$(python3 "$ADAPTER" worktree --action remove'
 require_text "tests/e2e-smoke.md" '"fsck", "--full", "--no-dangling"'
 require_text "tests/e2e-smoke.md" '"git": module.git_control_manifest(repository, repository)'

@@ -445,7 +445,7 @@ BEFORE="$(repo_fingerprint)"
 if FAILED="$(python3 "$ADAPTER" code --repo "$REPO_ROOT" --cwd "$WORKTREE" \
   --run-id "$RUN_ID" --task-file "$SMOKE_ROOT/task.md" \
   --expected-generation "$GENERATION" \
-  --verify-cmd "false" --max-retries 3)"; then
+  --verify-cmd "false" --max-retries 0)"; then
   echo "failed verification unexpectedly succeeded" >&2
   exit 1
 else

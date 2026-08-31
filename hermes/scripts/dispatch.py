@@ -392,6 +392,13 @@ def write_pool(role: str, model: str, directory: Path) -> Path:
     return Path(handle.name)
 
 
+def create_verification_home() -> Path:
+    """Create a private verification home and return its physical path."""
+    path = Path(tempfile.mkdtemp(prefix="claude-subagents-verify-")).resolve()
+    os.chmod(path, 0o700)
+    return path
+
+
 def add_envelope_fields(
     payload: dict[str, Any],
     run_id: str,
@@ -3323,8 +3330,7 @@ def run_coder(args: argparse.Namespace) -> dict[str, Any]:
         )
         pool_dir = Path(tempfile.mkdtemp(prefix="claude-subagents-pool-"))
         pool_path = write_pool("coder", model, pool_dir)
-        verify_home = Path(tempfile.mkdtemp(prefix="claude-subagents-verify-"))
-        os.chmod(verify_home, 0o700)
+        verify_home = create_verification_home()
         delegate_env = build_probe_env(
             role="coder",
             pool_path=pool_path,
@@ -4008,11 +4014,10 @@ def run_worktree_remove(
                 str(payload.get("diagnostic") or "worktree remove refused"),
                 session_ids=known_sessions,
             )
-            updated = _transition_state_unlocked(
+            updated = _update_state_fields_unlocked(
                 hermes_home,
                 run_id,
                 expected_generation,
-                "blocked",
                 {"failure": diagnostic},
             )
             return {
