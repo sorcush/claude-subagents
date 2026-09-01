@@ -86,9 +86,51 @@ changed_flag() {
 # could have.
 VERIFY_RC=0
 VERIFY_OUT=""
+# `test -L` only sees the exact spelling it receives; `link/` and `link/.`
+# conceal a final symlink, and a parent symlink is otherwise never checked.
+verify_home_is_safe() {
+  local path="$1" component current="/"
+  local -a components
+
+  [[ "$path" = /* && -d "$path" ]] || return 1
+  local IFS=/
+  read -r -a components <<< "${path#/}"
+  for component in "${components[@]}"; do
+    case "$component" in
+      ""|.) ;;
+      ..)
+        current="${current%/*}"
+        [[ -n "$current" ]] || current="/"
+        ;;
+      *)
+        if [[ "$current" == / ]]; then
+          current="/$component"
+        else
+          current="$current/$component"
+        fi
+        [[ ! -L "$current" ]] || return 1
+        ;;
+    esac
+  done
+  return 0
+}
+
 run_verify() {
   local f; f=$(mktemp)
-  ( cd "$CWD" && eval "$VERIFY_CMD" ) >"$f" 2>&1
+  if [[ -n "${CSC_VERIFY_HOME:-}" ]]; then
+    verify_home_is_safe "$CSC_VERIFY_HOME" || {
+      rm -f "$f"
+      VERIFY_RC=2
+      VERIFY_OUT="invalid CSC_VERIFY_HOME"
+      return
+    }
+    ( cd "$CWD" && env -i \
+        HOME="$CSC_VERIFY_HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
+        LANG="${LANG:-C}" LC_ALL="${LC_ALL:-}" USER="${USER:-}" SHELL="$BASH" \
+        "$BASH" -c "$VERIFY_CMD" ) >"$f" 2>&1
+  else
+    ( cd "$CWD" && eval "$VERIFY_CMD" ) >"$f" 2>&1
+  fi
   VERIFY_RC=$?
   VERIFY_OUT="$(cat "$f")"
   rm -f "$f"

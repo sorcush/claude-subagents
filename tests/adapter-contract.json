@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "scenarios": [
+    {"id": "missing-configuration", "applies_to": ["hermes"]},
+    {"id": "authentication-failure", "applies_to": ["claude", "hermes"]},
+    {"id": "missing-session-id", "applies_to": ["claude", "hermes"]},
+    {"id": "empty-verification", "applies_to": ["hermes"]},
+    {"id": "failed-verification", "applies_to": ["claude", "hermes"]},
+    {"id": "session-resume", "applies_to": ["claude", "hermes"]},
+    {"id": "dirty-controller-checkout", "applies_to": ["claude", "hermes"]},
+    {"id": "concurrent-worktrees", "applies_to": ["hermes"]},
+    {"id": "unintegrated-cleanup", "applies_to": ["claude", "hermes"]}
+  ]
+}

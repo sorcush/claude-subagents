@@ -17,7 +17,11 @@ check() {
 }
 
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+TEST_SHELL_PID=$BASHPID
+cleanup() {
+  [[ $BASHPID -eq $TEST_SHELL_PID ]] && rm -rf "$TMP"
+}
+trap cleanup EXIT
 
 # --- a fast command is untouched ---
 run_with_timeout 10 true
@@ -83,6 +87,66 @@ else
   done
   check "grandchild is really gone, not just unsignalable" "1" "$gone"
 fi
+
+# --- bounded capture preserves normal output, errors, and child status ---
+CAPTURE="$HERE/../scripts/lib/run-captured.py"
+stdout_file="$TMP/captured-normal.stdout"
+stderr_file="$TMP/captured-normal.stderr"
+printf 'existing-error\n' > "$stderr_file"
+python3 "$CAPTURE" --timeout-seconds 10 --max-stdout-bytes 65536 \
+  --stdout-file "$stdout_file" --stderr-file "$stderr_file" --cwd "$TMP" -- \
+  /bin/sh -c "printf normal-output; printf 'new-error\\n' >&2; exit 7"
+check "bounded capture returns child status" "7" "$?"
+check "bounded capture writes stdout" "normal-output" "$(<"$stdout_file")"
+check "bounded capture appends stderr" $'existing-error\nnew-error' "$(<"$stderr_file")"
+
+python3 "$CAPTURE" --timeout-seconds 1 --max-stdout-bytes 65536 \
+  --stdout-file "$TMP/captured-timeout.stdout" --stderr-file "$TMP/captured-timeout.stderr" \
+  --cwd "$TMP" -- sleep 30
+check "bounded capture returns 124 on timeout" "124" "$?"
+
+# --- bounded capture removes overflow and kills the whole new session ---
+cat > "$TMP/capture-spawner.sh" <<'SPAWN'
+#!/usr/bin/env bash
+set -u
+echo "$$" > "$1"
+sleep 300 &
+echo "$!" > "$2"
+printf -v chunk '%4096s' ''
+chunk=${chunk// /x}
+for ((i=0; i<32; i++)); do printf '%s' "$chunk"; done
+wait
+SPAWN
+chmod +x "$TMP/capture-spawner.sh"
+
+stdout_file="$TMP/captured.stdout"
+stderr_file="$TMP/captured.stderr"
+python3 "$CAPTURE" --timeout-seconds 30 --max-stdout-bytes 65536 \
+  --stdout-file "$stdout_file" --stderr-file "$stderr_file" --cwd "$TMP" -- \
+  "$TMP/capture-spawner.sh" "$TMP/captured-child.pid" "$TMP/captured-grandchild.pid"
+capture_rc=$?
+check "bounded capture returns 125 on overflow" "125" "$capture_rc"
+check "bounded capture removes partial stdout" "0" "$([[ -e "$stdout_file" ]] && echo 1 || echo 0)"
+
+capture_child=$(cat "$TMP/captured-child.pid" 2>/dev/null || echo "")
+capture_grandchild=$(cat "$TMP/captured-grandchild.pid" 2>/dev/null || echo "")
+check "bounded capture child pid was recorded" "1" "$([[ -n "$capture_child" ]] && echo 1 || echo 0)"
+check "bounded capture grandchild pid was recorded" "1" "$([[ -n "$capture_grandchild" ]] && echo 1 || echo 0)"
+
+process_gone() {
+  local pid="$1" gone=0
+  [[ -z "$pid" ]] && { echo 0; return; }
+  for _ in $(seq 1 50); do
+    if ! ps -p "$pid" -o stat= 2>/dev/null | grep -qv '^[[:space:]]*Z'; then
+      gone=1
+      break
+    fi
+    sleep 0.2
+  done
+  echo "$gone"
+}
+check "bounded capture kills direct child" "1" "$(process_gone "$capture_child")"
+check "bounded capture kills grandchild" "1" "$(process_gone "$capture_grandchild")"
 
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"

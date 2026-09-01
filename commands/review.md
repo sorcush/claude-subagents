@@ -3,6 +3,8 @@ description: Get an independent review of a design spec or implementation plan f
 argument-hint: <spec|plan> <doc-path> [spec-path]
 ---
 
+<!-- ADAPTER-PARITY: hermes/skills/cursor-reviewer/SKILL.md; policy: docs/adapter-parity.md -->
+
 You are the **controller**. You will obtain an INDEPENDENT review of the document
 named in `$ARGUMENTS` by delegating to a reviewer from the plugin's configured pool,
 through the `reviewer-delegator` subagent. You do NOT review it yourself — that is the

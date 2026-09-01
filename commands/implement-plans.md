@@ -3,6 +3,8 @@ description: Implement a written plan by delegating each task to a coder you pic
 argument-hint: <path-to-plan-file>
 ---
 
+<!-- ADAPTER-PARITY: hermes/skills/cursor-coder/SKILL.md; policy: docs/adapter-parity.md -->
+
 You are the **controller**. You will implement the plan at `$ARGUMENTS` by delegating
 each task's implementation to a coder from the plugin's configured pool (through the
 `coder-delegator` subagent) while YOU do the planning extraction and all review. The
@@ -85,7 +87,9 @@ FOUR overrides (state them to yourself before starting):
 
    When a task needs changes, send your comments back to the **same coder session** by
    re-dispatching with the `session_id` the subagent returned. A fix is a follow-up,
-   not a fresh delegation, so do NOT show the coder menu again.
+   not a fresh delegation, so do NOT show the coder menu again. Count actual Cursor
+   calls as `attempts + 1`: stop before a task would exceed nine calls, five
+   controller review rounds, or five hours spent in active coder dispatches.
 
 4. **Fast-forward after each passing task.** Once your review passes, in the main
    folder run:
@@ -97,6 +101,9 @@ FOUR overrides (state them to yourself before starting):
    most likely someone committed during the run. STOP and tell the user. Do not
    attempt a real merge; a conflict mid-run is worse than stopping. If the task
    changed nothing, this is a no-op and not an error.
+   The next serial plan task starts a new coder session and a fresh per-task
+   call/review/time budget. Reuse a session only for corrections to the current
+   unintegrated task, with zero internal retries.
 
 Everything else about subagent-driven-development (serial dispatch, TodoWrite task
 tracking, fix-and-re-review loops, handling DONE / DONE_WITH_CONCERNS) is UNCHANGED.

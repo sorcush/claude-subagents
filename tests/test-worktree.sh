@@ -41,18 +41,142 @@ r=$(new_repo r-work "feature/x-work")
 (cd "$r" && bash "$SCRIPT" prepare >/dev/null 2>&1)
 check "refuses on a -work branch" "1" "$([[ $? -ne 0 ]] && echo 1 || echo 0)"
 
-# --- happy path ---
+# --- run-scoped names and validation ---
+r=$(new_repo r-invalid-short)
+before=$(git -C "$r" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+(cd "$r" && CSC_RUN_ID=bad bash "$SCRIPT" prepare >/dev/null 2>&1); rc=$?
+after=$(git -C "$r" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+check "rejects a short run ID" "1" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+check "short run ID creates no branch" "$before" "$after"
+check "short run ID creates no directory" "0" \
+  "$(compgen -G "$ROOT/r-invalid-short-*" >/dev/null && echo 1 || echo 0)"
+
+r=$(new_repo r-invalid-hex)
+before=$(git -C "$r" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+(cd "$r" && CSC_RUN_ID=0123456789abcdeg bash "$SCRIPT" prepare >/dev/null 2>&1); rc=$?
+after=$(git -C "$r" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+check "rejects a non-hex run ID" "1" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+check "non-hex run ID creates no branch" "$before" "$after"
+check "non-hex run ID creates no directory" "0" \
+  "$(compgen -G "$ROOT/r-invalid-hex-*" >/dev/null && echo 1 || echo 0)"
+
+r=$(new_repo r-expected-identity)
+before=$(git -C "$r" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+(cd "$r" &&
+  CSC_RUN_ID=0123456789abcdef \
+  CSC_EXPECTED_FEATURE=feature/wrong \
+  bash "$SCRIPT" prepare >/dev/null 2>&1)
+rc=$?
+after=$(git -C "$r" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+check "expected feature mismatch is rejected before creation" "1" \
+  "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+check "expected feature mismatch creates no branch" "$before" "$after"
+check "expected feature mismatch creates no directory" "0" \
+  "$(compgen -G "$ROOT/r-expected-identity-*" >/dev/null && echo 1 || echo 0)"
+
+r=$(new_repo r-scoped)
+out1=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare 2>/dev/null); rc1=$?
+wt1=$(echo "$out1" | jq -r '.worktree')
+work1=$(echo "$out1" | jq -r '.work_branch')
+check "accepts a 16-character lowercase hex run ID" "0" "$rc1"
+check "first run branch is scoped" "feature-login-hermes-0123456789abcdef-work" "$work1"
+check "first run directory is scoped" "r-scoped-feature-login-hermes-0123456789abcdef-work" \
+  "$(basename "$wt1")"
+
+out2=$(cd "$r" && CSC_RUN_ID=fedcba9876543210 bash "$SCRIPT" prepare 2>/dev/null); rc2=$?
+wt2=$(echo "$out2" | jq -r '.worktree')
+work2=$(echo "$out2" | jq -r '.work_branch')
+check "accepts a second valid run ID" "0" "$rc2"
+check "second run branch is scoped" "feature-login-hermes-fedcba9876543210-work" "$work2"
+check "second run directory is scoped" "r-scoped-feature-login-hermes-fedcba9876543210-work" \
+  "$(basename "$wt2")"
+check "run IDs create distinct branches" "1" "$([[ "$work1" != "$work2" ]] && echo 1 || echo 0)"
+check "run IDs create distinct worktrees" "1" "$([[ "$wt1" != "$wt2" ]] && echo 1 || echo 0)"
+check "both scoped branches exist" "2" \
+  "$(( $(git -C "$r" show-ref --verify --quiet "refs/heads/$work1" && echo 1 || echo 0) + \
+       $(git -C "$r" show-ref --verify --quiet "refs/heads/$work2" && echo 1 || echo 0) ))"
+check "both scoped worktrees exist" "2" \
+  "$(( $([[ -d "$wt1" ]] && echo 1 || echo 0) + $([[ -d "$wt2" ]] && echo 1 || echo 0) ))"
+
+out=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" remove 2>/dev/null)
+check "remove targets the first run scope" "REMOVED" "$(echo "$out" | jq -r '.status')"
+check "removing one scope preserves the other" "1" \
+  "$([[ ! -d "$wt1" && -d "$wt2" ]] && echo 1 || echo 0)"
+out=$(cd "$r" && CSC_RUN_ID=fedcba9876543210 bash "$SCRIPT" remove 2>/dev/null)
+check "remove targets the second run scope" "REMOVED" "$(echo "$out" | jq -r '.status')"
+
+# Different feature names can sanitize to the same run-scoped name. Reuse is
+# valid only when the original feature identity also matches.
+r=$(new_repo r-collision "feature/a")
+out=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare 2>/dev/null)
+collision_wt=$(echo "$out" | jq -r '.worktree')
+(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare >/dev/null 2>&1); same_rc=$?
+check "run-scoped reuse accepts the same original feature" "0" "$same_rc"
+git -C "$r" checkout -q -b feature-a
+(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare >/dev/null 2>&1); collision_rc=$?
+check "run-scoped reuse rejects a sanitized feature collision" "1" \
+  "$([[ $collision_rc -ne 0 ]] && echo 1 || echo 0)"
+check "collision refusal preserves the original worktree" "feature-a-hermes-0123456789abcdef-work" \
+  "$(git -C "$collision_wt" rev-parse --abbrev-ref HEAD)"
+
+# Run-scoped removal must validate the same original feature identity as reuse.
+r=$(new_repo r-remove-same-feature "feature/a")
+out=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare 2>/dev/null)
+remove_same_wt=$(echo "$out" | jq -r '.worktree')
+remove_same_work=$(echo "$out" | jq -r '.work_branch')
+out=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" remove 2>/dev/null); same_remove_rc=$?
+check "run-scoped removal accepts the same original feature" "0" "$same_remove_rc"
+check "same-feature run-scoped removal reports REMOVED" "REMOVED" "$(echo "$out" | jq -r '.status')"
+check "same-feature run-scoped removal deletes worktree and branch" "1" \
+  "$([[ ! -e "$remove_same_wt" ]] && ! git -C "$r" show-ref --verify --quiet "refs/heads/$remove_same_work" && echo 1 || echo 0)"
+
+r=$(new_repo r-remove-collision "feature/a")
+out=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare 2>/dev/null)
+remove_collision_wt=$(echo "$out" | jq -r '.worktree')
+remove_collision_work=$(echo "$out" | jq -r '.work_branch')
+git -C "$r" checkout -q -b feature-a
+(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" remove >/dev/null 2>&1); collision_remove_rc=$?
+check "run-scoped removal rejects a sanitized feature collision" "1" \
+  "$([[ $collision_remove_rc -ne 0 ]] && echo 1 || echo 0)"
+check "collision removal refusal preserves worktree and branch" "1" \
+  "$([[ -d "$remove_collision_wt" ]] && git -C "$r" show-ref --verify --quiet "refs/heads/$remove_collision_work" && echo 1 || echo 0)"
+
+r=$(new_repo r-remove-missing-origin "feature/a")
+out=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare 2>/dev/null)
+missing_origin_wt=$(echo "$out" | jq -r '.worktree')
+missing_origin_work=$(echo "$out" | jq -r '.work_branch')
+missing_origin_git_dir=$(git -C "$missing_origin_wt" rev-parse --absolute-git-dir)
+rm -f "$missing_origin_git_dir/csc-origin-feature"
+(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" remove >/dev/null 2>&1); missing_origin_rc=$?
+check "run-scoped removal rejects missing origin metadata" "1" \
+  "$([[ $missing_origin_rc -ne 0 ]] && echo 1 || echo 0)"
+check "missing origin refusal preserves worktree and branch" "1" \
+  "$([[ -d "$missing_origin_wt" ]] && git -C "$r" show-ref --verify --quiet "refs/heads/$missing_origin_work" && echo 1 || echo 0)"
+
+r=$(new_repo r-remove-unreadable-origin "feature/a")
+out=$(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" prepare 2>/dev/null)
+unreadable_origin_wt=$(echo "$out" | jq -r '.worktree')
+unreadable_origin_work=$(echo "$out" | jq -r '.work_branch')
+unreadable_origin_git_dir=$(git -C "$unreadable_origin_wt" rev-parse --absolute-git-dir)
+rm -f "$unreadable_origin_git_dir/csc-origin-feature"
+mkdir "$unreadable_origin_git_dir/csc-origin-feature"
+(cd "$r" && CSC_RUN_ID=0123456789abcdef bash "$SCRIPT" remove >/dev/null 2>&1); unreadable_origin_rc=$?
+check "run-scoped removal rejects unreadable origin metadata" "1" \
+  "$([[ $unreadable_origin_rc -ne 0 ]] && echo 1 || echo 0)"
+check "unreadable origin refusal preserves worktree and branch" "1" \
+  "$([[ -d "$unreadable_origin_wt" ]] && git -C "$r" show-ref --verify --quiet "refs/heads/$unreadable_origin_work" && echo 1 || echo 0)"
+
+# --- legacy happy path with CSC_RUN_ID unset ---
 r=$(new_repo r-ok)
-out=$(cd "$r" && bash "$SCRIPT" prepare 2>/dev/null)
+out=$(cd "$r" && unset CSC_RUN_ID && bash "$SCRIPT" prepare 2>/dev/null)
 wt=$(echo "$out" | jq -r '.worktree')
 check "prepare reports READY"        "READY"              "$(echo "$out" | jq -r '.status')"
-check "work branch is named"         "feature/login-work" "$(echo "$out" | jq -r '.work_branch')"
+check "legacy work branch is exact"  "feature/login-work" "$(echo "$out" | jq -r '.work_branch')"
 check "feature branch is echoed"     "feature/login"      "$(echo "$out" | jq -r '.feature_branch')"
 check "worktree folder exists"       "1"                  "$([[ -d "$wt" ]] && echo 1 || echo 0)"
 check "worktree is a sibling"        "1" \
   "$([[ "$(dirname "$wt")" == "$(dirname "$r")" ]] && echo 1 || echo 0)"
-check "slashes became dashes"        "1" \
-  "$([[ "$(basename "$wt")" == *feature-login-work ]] && echo 1 || echo 0)"
+check "legacy worktree folder is exact" "r-ok-feature-login-work" "$(basename "$wt")"
 check "worktree is on the work branch" "feature/login-work" \
   "$(git -C "$wt" rev-parse --abbrev-ref HEAD)"
 check "one JSON line" "1" "$(echo "$out" | wc -l | tr -d ' ')"
