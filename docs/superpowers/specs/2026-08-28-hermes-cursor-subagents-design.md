@@ -119,7 +119,7 @@ tests/
 └── test-version-sync.sh
 ```
 
-The native manifest uses `name: claude-subagents`, `manifest_version: 2`,
+The native manifest uses `name: claude-subagents`, `manifest_version: 1`,
 `api_version: 1`, the same semantic version as `.claude-plugin/plugin.json`,
 and a `superpowers` plugin dependency constrained to `>=6.3.0,<7.0.0`. Version 2.2.0 is the
 design baseline; the release that introduces Hermes support receives the next
@@ -127,6 +127,10 @@ appropriate semantic version. The supported Hermes baseline is the verified
 v0.20.6 runtime. Older Hermes releases receive no compatibility claim until
 tested. Hermes treats `requires_plugins` as an advisory manifest declaration;
 it has no public API for querying another plugin's version.
+
+Hermes v0.21.0's Git installer accepts native manifest version 1. The runtime
+parser understands the dependency and configuration fields used here, but an
+unsupported higher manifest version is rejected before installation.
 
 The root `__init__.py` exports only `register(ctx)`. It parses each Hermes
 skill's frontmatter for metadata and calls `ctx.register_skill(name, path,

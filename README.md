@@ -190,10 +190,27 @@ hermes -p super-dev-codex config set \
 hermes -p super-dev-codex plugins enable claude-subagents
 ```
 
-Start a fresh Hermes session after enablement. For unreleased development only,
-link this checkout at
+Start a fresh Hermes session after enablement.
+
+Hermes keeps native plugin skills in a separate qualified registry. They are
+always loadable as `claude-subagents:cursor-coder` and
+`claude-subagents:cursor-reviewer`, but qualified names do not appear in
+`hermes skills list` or the slash palette by default. To expose the bare names
+`cursor-coder` and `cursor-reviewer` there too, append this directory to the
+profile's existing `skills.external_dirs` list without removing its current
+entries:
+
+```text
+~/.hermes/profiles/<profile>/plugins/claude-subagents/hermes/skills
+```
+
+For unreleased development only, link this checkout at
 `$HOME/.hermes/profiles/super-dev-codex/plugins/claude-subagents` instead of
 using the published install command; never replace an existing path blindly.
+Hermes resolves an existing plugin path before install as a traversal safety
+check, so a development symlink whose target is outside the profile will block
+a later GitHub install. Unlink that symlink first; `--force` cannot bypass the
+path-safety check.
 
 The coder supports one bounded task or a written plan. Cursor edits only a
 run-scoped linked worktree, with sandboxing, bounded output, a disposable

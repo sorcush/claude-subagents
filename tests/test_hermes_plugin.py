@@ -53,7 +53,7 @@ class HermesPluginManifestTests(unittest.TestCase):
         )["version"]
         self.assertEqual(manifest["version"], claude_version)
         self.assertEqual(manifest["name"], "claude-subagents")
-        self.assertEqual(manifest["manifest_version"], 2)
+        self.assertEqual(manifest["manifest_version"], 1)
         self.assertEqual(manifest["api_version"], 1)
         self.assertIn("coder_model", manifest["config_schema"])
         self.assertIn("reviewer_model", manifest["config_schema"])
@@ -68,6 +68,12 @@ class HermesPluginManifestTests(unittest.TestCase):
         self.assertEqual(len(requires), 1)
         self.assertEqual(requires[0]["id"], "superpowers")
         self.assertEqual(requires[0]["version_range"], ">=6.3.0,<7.0.0")
+
+    def test_readme_documents_skill_discoverability(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("skills.external_dirs", readme)
+        self.assertIn("plugins/claude-subagents/hermes/skills", readme)
+        self.assertIn("qualified names", readme)
 
 
 class HermesPluginRegistrationTests(unittest.TestCase):

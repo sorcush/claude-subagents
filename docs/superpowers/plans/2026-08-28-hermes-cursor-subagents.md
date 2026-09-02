@@ -367,7 +367,7 @@ Create `plugin.yaml` with these fields:
 ```yaml
 name: claude-subagents
 version: 2.2.0
-manifest_version: 2
+manifest_version: 1
 api_version: 1
 description: Cursor coder and document-reviewer workflows for Hermes Agent
 author: Andrey Sloutsman
