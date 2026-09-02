@@ -31,6 +31,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `-c sandbox_mode="read-only"`.
 - The verify command ran in the caller's directory rather than the coder's.
 
+## [2.3.0] - 2026-09-02
+
+### Added
+- add run-scoped worktree names
+- add opt-in Cursor execution guards
+- isolate delegated verification home
+- add Hermes Cursor dispatch foundation
+- add Hermes Cursor workflows
+
+### Changed
+- design Hermes Cursor subagents
+- clarify run-scoped worktree reuse
+- require safe run-scoped removal
+- record Hermes Cursor smoke results
+- compare Hermes Cursor and Superpowers workflows
+- explain trusted Hermes plugin installation
+- Revert Hermes Cursor subagents work
+
+### Fixed
+- reject run-scoped feature slug collisions
+- validate run-scoped removal origin
+- handle Cursor stream boundaries safely
+- reject symlinked verification home
+- reject symlink traversal in verification home
+- harden Hermes Cursor smoke lifecycle
+- make Hermes plugin installable and discoverable
+- report real changed/result on harness-invocation failure
+- preserve session id when a coder run times out
+- gate coder-delegator commits on real worktree isolation, not branch name
+
 ## [2.2.0] - 2026-08-23
 
 ### Changed
