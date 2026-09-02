@@ -110,8 +110,8 @@ typo such as `lable` fails loudly instead of being ignored.
 
 The `harness` value is checked by testing whether its file exists, not against a fixed
 list of names. This is what makes adding a tool a one-file change. The character rule
-is what makes it safe: without it, a `harness` value of `../../etc/passwd` would build
-a path outside the plugin.
+prevents a crafted parent-directory traversal value from building a path outside the
+plugin.
 
 The order of entries in the file is the order in the menu.
 

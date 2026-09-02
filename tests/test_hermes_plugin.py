@@ -74,6 +74,8 @@ class HermesPluginManifestTests(unittest.TestCase):
         self.assertIn("skills.external_dirs", readme)
         self.assertIn("plugins/claude-subagents/hermes/skills", readme)
         self.assertIn("qualified names", readme)
+        self.assertIn("--force --no-enable", readme)
+        self.assertIn("security scanner", readme)
 
 
 class HermesPluginRegistrationTests(unittest.TestCase):

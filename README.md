@@ -182,13 +182,19 @@ role models from the active profile and never falls back to `auto`.
 Install a released plugin disabled, configure the named profile, then enable it:
 
 ```bash
-hermes -p super-dev-codex plugins install sorcush/claude-subagents --no-enable
+hermes -p super-dev-codex plugins install \
+  sorcush/claude-subagents --force --no-enable
 hermes -p super-dev-codex config set \
   plugins.entries.claude-subagents.settings.coder_model composer-2.5
 hermes -p super-dev-codex config set \
   plugins.entries.claude-subagents.settings.reviewer_model gpt-5.6-sol-high
 hermes -p super-dev-codex plugins enable claude-subagents
 ```
+
+This repository intentionally contains shell execution code, security tests,
+and test fixtures for unsafe paths. Hermes' security scanner therefore returns
+a caution verdict for this trusted source. `--force` accepts caution findings;
+it still cannot override a dangerous verdict.
 
 Start a fresh Hermes session after enablement.
 
