@@ -17,36 +17,9 @@ BIG_DIR_ENTRIES=5000
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git repository"
 ROOT="$(cd "$ROOT" && pwd -P)"
 FEATURE="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
-RUN_ID="${CSC_RUN_ID:-}"
-if [[ -n "$RUN_ID" && ! "$RUN_ID" =~ ^[a-f0-9]{16}$ ]]; then
-  die "CSC_RUN_ID must match ^[a-f0-9]{16}$"
-fi
-
-sanitize_slug() {
-  local value="$1"
-  value="$(printf '%s' "$value" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/-+/-/g; s/^[._-]+//; s/[._-]+$//')"
-  [[ -n "$value" ]] || value=branch
-  printf '%.80s' "$value"
-}
-
-SLUG="$(sanitize_slug "$FEATURE")"
-if [[ -n "$RUN_ID" ]]; then
-  WORK="${SLUG}-hermes-${RUN_ID}-work"
-  WT="$(dirname "$ROOT")/$(basename "$ROOT")-${SLUG}-hermes-${RUN_ID}-work"
-else
-  WORK="${FEATURE}-work"
-  SLUG="${FEATURE//\//-}"
-  WT="$(dirname "$ROOT")/$(basename "$ROOT")-${SLUG}-work"
-fi
-if [[ -n "${CSC_EXPECTED_FEATURE:-}" && "$FEATURE" != "$CSC_EXPECTED_FEATURE" ]]; then
-  die "feature branch changed before worktree preparation"
-fi
-if [[ -n "${CSC_EXPECTED_WORK_BRANCH:-}" && "$WORK" != "$CSC_EXPECTED_WORK_BRANCH" ]]; then
-  die "work branch identity changed before worktree preparation"
-fi
-if [[ -n "${CSC_EXPECTED_WORKTREE:-}" && "$WT" != "$CSC_EXPECTED_WORKTREE" ]]; then
-  die "worktree path identity changed before worktree preparation"
-fi
+WORK="${FEATURE}-work"
+SLUG="${FEATURE//\//-}"
+WT="$(dirname "$ROOT")/$(basename "$ROOT")-${SLUG}-work"
 
 TMP_ERR="$(mktemp)"
 trap 'rm -f "$TMP_ERR"' EXIT
@@ -175,22 +148,12 @@ cmd_prepare() {
   [[ "$FEATURE" != *-work ]] \
     || die "refusing to run on '$FEATURE': it is already a work branch."
 
-  local have_branch=0 have_wt=0 gd origin_file origin_feature
+  local have_branch=0 have_wt=0
   branch_exists "$WORK" && have_branch=1
   [[ -e "$WT" ]] && have_wt=1
 
   if [[ $have_branch -eq 1 && $have_wt -eq 1 ]]; then
     wt_registered || die "'$WT' exists but is not this repository's worktree for '$WORK'. Inspect it by hand."
-    if [[ -n "$RUN_ID" ]]; then
-      gd="$(wt_git_dir)" || die "cannot inspect run-scoped worktree '$WT'."
-      origin_file="$gd/csc-origin-feature"
-      [[ -r "$origin_file" ]] \
-        || die "cannot verify the original feature for run-scoped worktree '$WT'. Inspect it by hand."
-      IFS= read -r origin_feature < "$origin_file" \
-        || die "cannot read the original feature for run-scoped worktree '$WT'. Inspect it by hand."
-      [[ "$origin_feature" == "$FEATURE" ]] \
-        || die "run-scoped worktree '$WT' belongs to feature '$origin_feature', not '$FEATURE'."
-    fi
     [[ -z "$(git -C "$WT" status --porcelain 2>/dev/null)" ]] \
       || die "worktree '$WT' has uncommitted changes from an earlier run. Commit, discard, or remove it."
     # Strict on purpose: a clean branch merely DESCENDED from the feature branch
@@ -209,14 +172,9 @@ cmd_prepare() {
   else
     git -C "$ROOT" worktree add -q -b "$WORK" "$WT" "$FEATURE" \
       || die "git worktree add failed"
-    if [[ -n "$RUN_ID" ]]; then
-      gd="$(wt_git_dir)" || die "cannot inspect new run-scoped worktree '$WT'."
-      printf '%s\n' "$FEATURE" > "$gd/csc-origin-feature" \
-        || die "cannot record the original feature for run-scoped worktree '$WT'."
-    fi
   fi
 
-  local manifest
+  local gd manifest
   gd="$(wt_git_dir)"
   manifest="$gd/csc-copied"
 
@@ -291,18 +249,6 @@ cmd_remove() {
     return 0
   }
 
-  local gd origin_file origin_feature
-  if [[ -n "$RUN_ID" ]]; then
-    gd="$(wt_git_dir)" || die "cannot inspect run-scoped worktree '$WT'."
-    origin_file="$gd/csc-origin-feature"
-    [[ -r "$origin_file" ]] \
-      || die "cannot verify the original feature for run-scoped worktree '$WT'. Inspect it by hand."
-    IFS= read -r origin_feature < "$origin_file" \
-      || die "cannot read the original feature for run-scoped worktree '$WT'. Inspect it by hand."
-    [[ "$origin_feature" == "$FEATURE" ]] \
-      || die "run-scoped worktree '$WT' belongs to feature '$origin_feature', not '$FEATURE'."
-  fi
-
   # Everything below uses `branch -d`, not `-D`. It is safe precisely because
   # this ancestry check has already proved nothing would be lost.
   if ! git -C "$ROOT" merge-base --is-ancestor "$WORK" "$FEATURE"; then
@@ -316,7 +262,7 @@ cmd_remove() {
 
   # Delete ONLY what prepare created. git worktree remove refuses to run while
   # untracked files are present, and the copied dependencies are untracked.
-  local manifest d
+  local gd manifest d
   gd="$(wt_git_dir)"
   manifest="$gd/csc-copied"
   if [[ -r "$manifest" ]]; then

@@ -94,18 +94,3 @@
   `rubrics/lens-backend.md`: "a stated guarantee needs a test that attacks it, not prose
   that restates it" — the isolation guarantee leaked three times in design and twice more
   in implementation, each time caught only after being written down as safe.
-
-## 2026-08-31 — Hermes adapter live coder smoke
-
-- **Host:** Hermes · coder: Cursor Composer 2.5 · session
-  `179ccfe2-34ff-41cc-b6ff-183c3b5c9bb7` · disposable repository and feature branch.
-- **Outcome:** the initial edit intentionally failed verification with zero automatic
-  retries. A correction resumed the same Cursor session and passed verification. The
-  controller checkout remained unchanged before integration, the controller created the
-  commit, fast-forward integration succeeded, and integrated cleanup removed the worktree.
-- **Safety checks:** cleanup refused while the commit was unintegrated and preserved the
-  worktree. The run then recovered, integrated, and cleaned up successfully.
-- **Findings:** live execution exposed two adapter issues that deterministic tests missed:
-  macOS logical `/var` temporary paths failed the non-symlink verification-home guard, and
-  cleanup refusal incorrectly changed a reviewable run to `blocked`. Both received focused
-  regressions, fixes, and independent Cursor review before this entry.

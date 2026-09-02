@@ -1,8 +1,5 @@
 .DS_Store
 *.tmp
-__pycache__/
-*.py[cod]
-.pytest_cache/
 
 # Scratch workspace for subagent-driven development runs: briefs, reports and
 # review diffs. Never part of the repository. The skill drops its own ignore

@@ -198,15 +198,3 @@
   that. (2) Add to `lens-backend.md`: "a stated guarantee needs a test that
   attacks it, not prose that restates it." Three rounds, three leaks of the same
   guarantee, each caught only after it was written down as safe.
-
-## 2026-08-31 — Hermes adapter live reviewer smoke
-
-- **Host:** Hermes · reviewer: Cursor GPT-5.6 Sol · session
-  `64b15e0a-7033-4ef7-afdd-7e7192b0cf43` · target: specification · lens: backend.
-- **Outcome:** the configured probe returned `READY`. The initial review and resumed
-  review both returned non-empty reports with the same Cursor session ID. The reviewer
-  state reached `complete` at generation 5.
-- **Isolation:** both calls used disposable independent clones. The controller repository
-  remained unchanged, and successful review snapshots were removed automatically.
-- **Environment finding:** the smoke procedure's temporary Hermes home must contain its
-  own model settings. Cursor authentication continues to use the normal user home.
