@@ -53,12 +53,24 @@ controller gives you a **coder key**; the script maps it.
    `{"status":..., "coder":..., "session_id":..., "attempts":N, "verified":bool, "changed":bool, "commit_id":"", "result":..., "verify_output":...}`
    Read it with `jq`. Everything on stderr is diagnostics.
 4. If `status` is `DONE`, commit **inside the worktree**:
-   1. Confirm the branch first:
+   1. Confirm isolation first — check the property that actually matters, not a
+      naming convention:
       ```
-      git -C "<worktree path>" rev-parse --abbrev-ref HEAD
+      branch=$(git -C "<worktree path>" rev-parse --abbrev-ref HEAD)
+      git_dir=$(git -C "<worktree path>" rev-parse --git-dir)
+      common_dir=$(git -C "<worktree path>" rev-parse --git-common-dir)
       ```
-      It MUST end in `-work`. If it does not, stop and report BLOCKED — you are not
-      in the isolated worktree and must not commit.
+      A linked worktree has a private git-dir distinct from the repo's common
+      git-dir; the primary checkout does not. Stop and report BLOCKED — you are
+      not in an isolated worktree and must not commit — if either holds:
+      - `git_dir` resolves to the same path as `common_dir` (this is the primary
+        checkout, not a linked worktree), or
+      - `branch` is `main` or `master` (never commit directly to it, isolated
+        worktree or not).
+      A worktree that fails this check is unsafe regardless of what its branch
+      is named; one that passes is safe regardless of whether the branch ends
+      in `-work` (that suffix is only the naming convention `worktree.sh`
+      happens to use — it is not what makes a worktree isolated).
    2. Check whether anything changed:
       ```
       git -C "<worktree path>" status --porcelain
