@@ -106,7 +106,7 @@ PROMPT="Read the file $TASK_FILE and implement the task it describes. Make all n
 
 HARNESS_TIMED_OUT=0
 if ! harness_run "edit" "$ENTRY_MODEL" "$CWD" "$PROMPT" "$SESSION"; then
-  emit BLOCKED "$SESSION_ID" 0 false false "" "coder invocation failed: $(cat "$ERR_FILE" 2>/dev/null)"
+  emit BLOCKED "$SESSION_ID" 0 false "$(changed_flag)" "$RESULT" "coder invocation failed: $(cat "$ERR_FILE" 2>/dev/null)"
   exit 1
 fi
 

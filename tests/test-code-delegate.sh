@@ -132,6 +132,13 @@ check "timeout is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
 check "timeout says so in the output" "1" \
   "$([[ "$(echo "$out" | jq -r '.verify_output')" == *timed\ out* ]] && echo 1 || echo 0)"
 
+# --- a timeout must still report changes the coder left behind, not a
+# hardcoded false — a caller trusting changed:false may discard finished work.
+echo "left behind" > "$WT/timeout-leftover.txt"
+out=$(CSC_RUN_TIMEOUT=1 MOCK_SLEEP=5 run --coder c-codex --verify-cmd "true" 2>/dev/null)
+check "timeout with dirty worktree reports changed:true" "true" "$(echo "$out" | jq -r '.changed')"
+rm -f "$WT/timeout-leftover.txt"
+
 rm -rf "$WT"
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"
