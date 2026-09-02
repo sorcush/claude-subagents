@@ -10,12 +10,12 @@
 #   MOCK_RESULT=<text>  -> result text to emit (default "done"; empty string stays empty)
 #   MOCK_STREAM=1       -> emit progress events before the terminal result line
 #   MOCK_STREAM_TEXT=<text> -> text of the assistant progress event (default "reviewing")
-#   MOCK_SLEEP=<secs>   -> stall this long before answering, to exercise timeouts
+#   MOCK_SLEEP=<secs>   -> stall this long after announcing the session, before
+#                          answering, to exercise timeouts that hit mid-run
 #   MOCK_LOG=<path>     -> append "ARGS: $*" (all argv, incl. the prompt) to this file
 set -euo pipefail
 
 if [[ -n "${MOCK_LOG:-}" ]]; then echo "ARGS: $*" | tr '\n' ' ' >> "$MOCK_LOG"; fi
-if [[ -n "${MOCK_SLEEP:-}" ]]; then sleep "$MOCK_SLEEP"; fi
 if [[ -n "${MOCK_STDERR:-}" ]]; then echo "$MOCK_STDERR" >&2; fi
 if [[ "${MOCK_FAIL_CLI:-0}" == "1" ]]; then
   echo "Cannot use this model: simulated error." >&2
@@ -26,13 +26,18 @@ session="${MOCK_SESSION-sess-mock-1}"
 # Use ${VAR-default} (not :-) so an explicit empty MOCK_RESULT stays empty.
 result="${MOCK_RESULT-done}"
 
+# The real CLI announces session_id in this init event before doing any work,
+# so it always prints first — a caller killed mid-run still saw it.
+printf '{"type":"system","subtype":"init","cwd":"/tmp","session_id":"%s","model":"gpt-5.5-high","permissionMode":"ask"}\n' "$session"
+
 if [[ "${MOCK_STREAM:-0}" == "1" ]]; then
-  printf '{"type":"system","subtype":"init","cwd":"/tmp","session_id":"%s","model":"gpt-5.5-high","permissionMode":"ask"}\n' "$session"
   printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]},"session_id":"%s"}\n' \
     "${MOCK_STREAM_TEXT:-reviewing}" "$session"
   printf '{"type":"tool_call","subtype":"started","call_id":"tc1","tool_call":{"readToolCall":{"args":{"path":"README.md"}}},"session_id":"%s"}\n' "$session"
   printf '{"type":"tool_call","subtype":"completed","call_id":"tc1","tool_call":{"readToolCall":{"args":{"path":"README.md"},"result":{"success":{}}}},"session_id":"%s"}\n' "$session"
 fi
+
+if [[ -n "${MOCK_SLEEP:-}" ]]; then sleep "$MOCK_SLEEP"; fi
 
 if [[ "${MOCK_IS_ERROR:-0}" == "1" ]]; then
   printf '{"type":"result","subtype":"error","is_error":true,"duration_ms":10,"result":"%s","session_id":"%s","request_id":"req-mock"}\n' \

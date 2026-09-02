@@ -11,12 +11,12 @@
 #   MOCK_RESULT=<text>   -> agent_message text to emit (default "done"; empty stays empty)
 #   MOCK_STREAM=1        -> emit a non-agent_message item.completed event before the final one
 #   MOCK_STREAM_TEXT=<text> -> text of the progress event (default "exploring README.md")
-#   MOCK_SLEEP=<secs>    -> stall this long before answering, to exercise timeouts
+#   MOCK_SLEEP=<secs>    -> stall this long after announcing the thread, before
+#                           answering, to exercise timeouts that hit mid-run
 #   MOCK_LOG=<path>      -> append "ARGS: $*" (all argv, incl. the prompt) to this file
 set -euo pipefail
 
 if [[ -n "${MOCK_LOG:-}" ]]; then echo "ARGS: $*" | tr '\n' ' ' >> "$MOCK_LOG"; fi
-if [[ -n "${MOCK_SLEEP:-}" ]]; then sleep "$MOCK_SLEEP"; fi
 if [[ -n "${MOCK_STDERR:-}" ]]; then echo "$MOCK_STDERR" >&2; fi
 
 session="${MOCK_SESSION:-mock-thread-1}"
@@ -27,6 +27,8 @@ if [[ "${MOCK_FAIL_CLI:-0}" == "1" ]]; then
   exit 1
 fi
 
+# The real CLI announces thread_id in this event before doing any work, so it
+# always prints first — a caller killed mid-run still saw it.
 printf '{"type":"thread.started","thread_id":"%s"}\n' "$session"
 printf '{"type":"turn.started"}\n'
 
@@ -39,6 +41,8 @@ if [[ "${MOCK_STREAM:-0}" == "1" ]]; then
   printf '{"type":"item.completed","item":{"id":"item_pre","type":"reasoning","text":"%s"}}\n' \
     "${MOCK_STREAM_TEXT:-exploring README.md}"
 fi
+
+if [[ -n "${MOCK_SLEEP:-}" ]]; then sleep "$MOCK_SLEEP"; fi
 
 printf '{"type":"item.completed","item":{"id":"item_final","type":"agent_message","text":"%s"}}\n' "$result"
 printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'

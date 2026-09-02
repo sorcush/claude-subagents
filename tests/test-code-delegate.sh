@@ -139,6 +139,16 @@ out=$(CSC_RUN_TIMEOUT=1 MOCK_SLEEP=5 run --coder c-codex --verify-cmd "true" 2>/
 check "timeout with dirty worktree reports changed:true" "true" "$(echo "$out" | jq -r '.changed')"
 rm -f "$WT/timeout-leftover.txt"
 
+# --- a timeout must still report the real session id, not an empty one —
+# every harness announces its session before doing any work, so a run killed
+# mid-work should still be resumable with --session.
+for k in c-cursor c-codex c-claude; do
+  out=$(CSC_RUN_TIMEOUT=1 MOCK_SLEEP=5 MOCK_SESSION="sess-timeout-$k" \
+        run --coder "$k" --verify-cmd "true" 2>/dev/null)
+  check "$k timeout reports the real session id" "sess-timeout-$k" \
+    "$(echo "$out" | jq -r '.session_id')"
+done
+
 rm -rf "$WT"
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"

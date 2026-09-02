@@ -82,13 +82,25 @@ harness_run() {
     >"$outfile" 2>>"$ERR_FILE"
   rc=$?
 
+  local type
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
-    if [[ "$(jq -r '.type // ""' <<<"$line" 2>/dev/null)" == "result" ]]; then
-      result_line="$line"
-    else
-      harness_render "$line"
-    fi
+    type=$(jq -r '.type // ""' <<<"$line" 2>/dev/null)
+    case "$type" in
+      result)
+        result_line="$line"
+        ;;
+      system)
+        # The init event announces session_id before any work happens, so a
+        # run killed by the timeout below still leaves a resumable session id.
+        if [[ -z "$SESSION_ID" && "$(jq -r '.subtype // ""' <<<"$line" 2>/dev/null)" == "init" ]]; then
+          SESSION_ID=$(jq -r '.session_id // ""' <<<"$line" 2>/dev/null)
+        fi
+        ;;
+      *)
+        harness_render "$line"
+        ;;
+    esac
   done < "$outfile"
   rm -f "$outfile"
 

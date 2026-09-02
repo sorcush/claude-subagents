@@ -9,13 +9,13 @@
 #   MOCK_SESSION=<id>   -> session_id to emit (default claude-mock-1)
 #   MOCK_RESULT=<text>  -> result text to emit (default "done"; empty stays empty)
 #   MOCK_STREAM=1       -> emit progress events before the terminal result line
-#   MOCK_SLEEP=<secs>   -> stall this long before answering, to exercise timeouts
+#   MOCK_SLEEP=<secs>   -> stall this long after announcing the session, before
+#                          answering, to exercise timeouts that hit mid-run
 #   MOCK_LOG=<path>     -> append "ARGS: $*" (all argv, incl. the prompt) to this file
 set -euo pipefail
 
 if [[ -n "${MOCK_LOG:-}" ]]; then echo "ARGS: $*" | tr '\n' ' ' >> "$MOCK_LOG"; fi
 if [[ -n "${MOCK_STDERR:-}" ]]; then echo "$MOCK_STDERR" >&2; fi
-if [[ -n "${MOCK_SLEEP:-}" ]]; then sleep "$MOCK_SLEEP"; fi
 if [[ "${MOCK_FAIL_CLI:-0}" == "1" ]]; then
   echo "claude: simulated CLI failure" >&2
   exit 1
@@ -24,11 +24,15 @@ fi
 session="${MOCK_SESSION:-claude-mock-1}"
 result="${MOCK_RESULT-done}"
 
+# The real CLI announces session_id in this init event before doing any work,
+# so it always prints first — a caller killed mid-run still saw it.
 printf '{"type":"system","subtype":"init","session_id":"%s","model":"mock"}\n' "$session"
 
 if [[ "${MOCK_STREAM:-0}" == "1" ]]; then
   printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]},"session_id":"%s"}\n' "$session"
 fi
+
+if [[ -n "${MOCK_SLEEP:-}" ]]; then sleep "$MOCK_SLEEP"; fi
 
 if [[ "${MOCK_IS_ERROR:-0}" == "1" ]]; then
   printf '{"type":"result","subtype":"error","is_error":true,"result":"%s","session_id":"%s"}\n' "$result" "$session"
