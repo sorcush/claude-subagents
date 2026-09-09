@@ -30,6 +30,19 @@ result="${MOCK_RESULT-done}"
 # so it always prints first — a caller killed mid-run still saw it.
 printf '{"type":"system","subtype":"init","cwd":"/tmp","session_id":"%s","model":"gpt-5.5-high","permissionMode":"ask"}\n' "$session"
 
+if [[ -n "${MOCK_EDIT_FILE:-}" ]]; then
+  printf '%s\n' "${MOCK_EDIT_CONTENT:-delegated change}" > "$MOCK_EDIT_FILE"
+fi
+
+if [[ -n "${MOCK_GIT_COMMAND:-}" ]]; then
+  bash -c "$MOCK_GIT_COMMAND"
+fi
+
+if [[ -n "${MOCK_LINGER_PID_FILE:-}" ]]; then
+  sleep "${MOCK_LINGER_SECONDS:-300}" &
+  echo $! > "$MOCK_LINGER_PID_FILE"
+fi
+
 if [[ "${MOCK_STREAM:-0}" == "1" ]]; then
   printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]},"session_id":"%s"}\n' \
     "${MOCK_STREAM_TEXT:-reviewing}" "$session"

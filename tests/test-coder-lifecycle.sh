@@ -112,6 +112,26 @@ check "recovery refuses while owner is alive" "1" "$?"
 kill -KILL "$owner_pid" 2>/dev/null
 wait "$owner_pid" 2>/dev/null
 before_hash=$(git -C "$WT" status --porcelain=v1 | shasum -a 256 | awk '{print $1}')
+
+lifecycle_recover "$WT" 1-2-3 >/dev/null 2>&1
+check "recovery rejects the wrong lifecycle id" "1" "$?"
+
+echo drift > "$WT/recovery-drift.txt"
+lifecycle_recover "$WT" "$stale_id" >/dev/null 2>&1
+check "recovery rejects changed-path drift" "1" "$?"
+rm "$WT/recovery-drift.txt"
+
+git -C "$WT" switch -q -c feature/recovery-drift
+lifecycle_recover "$WT" "$stale_id" >/dev/null 2>&1
+check "recovery rejects branch drift" "1" "$?"
+git -C "$WT" switch -q feature/safety-work
+git -C "$WT" branch -D feature/recovery-drift >/dev/null
+
+git -C "$WT" commit -q --allow-empty -m drift
+lifecycle_recover "$WT" "$stale_id" >/dev/null 2>&1
+check "recovery rejects commit drift" "1" "$?"
+git -C "$WT" reset --hard -q HEAD^
+
 lifecycle_recover "$WT" "$stale_id"
 check "recovery accepts a stopped stale owner" "0" "$?"
 after_hash=$(git -C "$WT" status --porcelain=v1 | shasum -a 256 | awk '{print $1}')

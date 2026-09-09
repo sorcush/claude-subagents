@@ -32,6 +32,19 @@ fi
 printf '{"type":"thread.started","thread_id":"%s"}\n' "$session"
 printf '{"type":"turn.started"}\n'
 
+if [[ -n "${MOCK_EDIT_FILE:-}" ]]; then
+  printf '%s\n' "${MOCK_EDIT_CONTENT:-delegated change}" > "$MOCK_EDIT_FILE"
+fi
+
+if [[ -n "${MOCK_GIT_COMMAND:-}" ]]; then
+  bash -c "$MOCK_GIT_COMMAND"
+fi
+
+if [[ -n "${MOCK_LINGER_PID_FILE:-}" ]]; then
+  sleep "${MOCK_LINGER_SECONDS:-300}" &
+  echo $! > "$MOCK_LINGER_PID_FILE"
+fi
+
 if [[ "${MOCK_TURN_FAILED:-0}" == "1" ]]; then
   printf '{"type":"turn.failed","error":{"message":"simulated provider error"}}\n'
   exit 1

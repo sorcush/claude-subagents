@@ -17,6 +17,7 @@ LIFECYCLE_STARTED_AT=""
 LIFECYCLE_OWNER_STARTED=""
 LIFECYCLE_START_BRANCH=""
 LIFECYCLE_START_COMMIT=""
+LIFECYCLE_ATTEMPTS=0
 
 lifecycle_resolve_paths() {  # <cwd>
   local cwd="$1" git_dir common_dir branch
@@ -91,6 +92,7 @@ lifecycle_write_state() {  # <state> <session> <pgid> <writer-stopped> <diagnost
     --arg start_branch "$LIFECYCLE_START_BRANCH" \
     --arg start_commit "$LIFECYCLE_START_COMMIT" \
     --arg observed_commit "$observed_commit" \
+    --argjson attempts "$LIFECYCLE_ATTEMPTS" \
     --argjson stopped "$stopped" \
     --argjson files "$files" \
     --arg diagnostic "$diagnostic" \
@@ -98,7 +100,7 @@ lifecycle_write_state() {  # <state> <session> <pgid> <writer-stopped> <diagnost
       owner_started:$owner_started,started_at:$started_at,coder:$coder,
       session_id:$session,process_group_id:$pgid,worktree:$worktree,
       branch:$branch,start_branch:$start_branch,start_commit:$start_commit,
-      observed_commit:$observed_commit,writer_stopped:$stopped,
+      observed_commit:$observed_commit,attempts:$attempts,writer_stopped:$stopped,
       files_changed:$files,diagnostic:$diagnostic}' > "$tmp" \
     || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$LIFECYCLE_STATE_FILE"
@@ -161,6 +163,7 @@ lifecycle_open() {  # <cwd> <coder> <resume-lifecycle-id>
     LIFECYCLE_SESSION_ID="$(jq -r '.session_id // ""' "$LIFECYCLE_STATE_FILE")"
     LIFECYCLE_START_BRANCH="$(jq -r '.start_branch // .branch // ""' "$LIFECYCLE_STATE_FILE")"
     LIFECYCLE_START_COMMIT="$(jq -r '.start_commit // .observed_commit // ""' "$LIFECYCLE_STATE_FILE")"
+    LIFECYCLE_ATTEMPTS="$(jq -r '.attempts // 0' "$LIFECYCLE_STATE_FILE")"
   else
     if [[ -n "$resume_id" ]]; then
       LIFECYCLE_DIAGNOSTIC="no recovery state exists for lifecycle $resume_id"
@@ -176,6 +179,7 @@ lifecycle_open() {  # <cwd> <coder> <resume-lifecycle-id>
     LIFECYCLE_START_BRANCH="$(git -C "$LIFECYCLE_WORKTREE" branch --show-current)"
     LIFECYCLE_START_COMMIT="$(git -C "$LIFECYCLE_WORKTREE" rev-parse HEAD)"
     LIFECYCLE_SESSION_ID=""
+    LIFECYCLE_ATTEMPTS=0
   fi
 
   owner_tmp="$LIFECYCLE_LOCK_DIR/owner.json.tmp"
@@ -257,6 +261,7 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
   LIFECYCLE_OWNER_STARTED="$(lifecycle_process_started "$recovery_pid")"
   LIFECYCLE_START_BRANCH="$(jq -r '.start_branch // .branch // ""' "$LIFECYCLE_STATE_FILE")"
   LIFECYCLE_START_COMMIT="$(jq -r '.start_commit // .observed_commit // ""' "$LIFECYCLE_STATE_FILE")"
+  LIFECYCLE_ATTEMPTS="$(jq -r '.attempts // 0' "$LIFECYCLE_STATE_FILE")"
   tmp="$LIFECYCLE_STATE_FILE.tmp.$BASHPID.$RANDOM"
   jq '.state="recoverable" | .writer_stopped=true | .process_group_id=""' \
     "$LIFECYCLE_STATE_FILE" > "$tmp" || {

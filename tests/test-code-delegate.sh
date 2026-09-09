@@ -31,12 +31,40 @@ cat > "$TMP/coders.json" <<'EOF'
 EOF
 export CSC_CODERS_JSON="$TMP/coders.json"
 
-# The worktree the coder is supposed to work in.
-WT=$(cd "$(mktemp -d)" && pwd -P)
-(cd "$WT" && git init -q && git commit -q --allow-empty -m init)
+# The coder must run in a linked feature worktree, never the primary checkout.
+MAIN="$TMP/main"
+WT="$TMP/task-work"
+WT_MAIN="$TMP/main-work"
+WT_MASTER="$TMP/master-work"
+git init -q -b main "$MAIN"
+git -C "$MAIN" config user.email test@example.com
+git -C "$MAIN" config user.name Test
+echo base > "$MAIN/base.txt"
+git -C "$MAIN" add base.txt
+git -C "$MAIN" commit -q -m init
+git -C "$MAIN" switch -q -c setup
+git -C "$MAIN" branch master main
+git -C "$MAIN" worktree add -q -b feature/test "$WT" main
+git -C "$MAIN" worktree add -q "$WT_MAIN" main
+git -C "$MAIN" worktree add -q "$WT_MASTER" master
+WT=$(cd "$WT" && pwd -P)
 task="$TMP/task.md"; echo "Do the thing." > "$task"
 
-run() { bash "$SCRIPT" --task-file "$task" --cwd "$WT" "$@"; }
+run() {
+  bash "$SCRIPT" --task-file "$task" --cwd "$WT" \
+    --commit-message "test: delegated task" "$@"
+}
+
+clear_lifecycle_at() {
+  local worktree="$1" private_git
+  private_git=$(git -C "$worktree" rev-parse --absolute-git-dir)
+  rm -rf "$private_git/claude-subagents-coder.lock" \
+    "$private_git/claude-subagents-coder-recovery.lock"
+  rm -f "$private_git/claude-subagents-coder-state.json"
+  git -C "$worktree" reset --hard -q HEAD
+  git -C "$worktree" clean -fdq
+}
+clear_lifecycle() { clear_lifecycle_at "$WT"; }
 
 # --- happy path on every harness ---
 for k in c-cursor c-codex c-claude; do
@@ -48,6 +76,30 @@ for k in c-cursor c-codex c-claude; do
   check "$k commit_id is empty"   ""       "$(echo "$out" | jq -r '.commit_id')"
   check "$k emits one JSON line" "1"      "$(echo "$out" | wc -l | tr -d ' ')"
 done
+
+# --- the lifecycle owns the commit and reports observed state ---
+edit_file="$WT/delegated.txt"
+out=$(MOCK_EDIT_FILE="$edit_file" MOCK_EDIT_CONTENT="owned change" \
+      run --coder c-codex --verify-cmd "test -f '$edit_file'" 2>/dev/null)
+edit_commit=$(echo "$out" | jq -r '.commit_id')
+check "mock edit reports DONE" "DONE" "$(echo "$out" | jq -r '.status')"
+check "mock edit reports changed" "true" "$(echo "$out" | jq -r '.changed')"
+check "mock edit reports a real commit" "$edit_commit" "$(git -C "$WT" rev-parse HEAD)"
+check "mock edit reports changed path" "delegated.txt" "$(echo "$out" | jq -r '.files_changed[0]')"
+check "mock edit leaves worktree clean" "true" "$(echo "$out" | jq -r '.worktree_clean')"
+check "mock edit reports writer stopped" "true" "$(echo "$out" | jq -r '.writer_stopped')"
+check "mock edit commit exists" "1" "$(git -C "$WT" cat-file -e "$edit_commit^{commit}" 2>/dev/null && echo 1 || echo 0)"
+check "mock edit worktree is actually clean" "" "$(git -C "$WT" status --porcelain)"
+
+before_no_change=$(git -C "$WT" rev-parse HEAD)
+out=$(run --coder c-codex --verify-cmd "true" 2>/dev/null)
+check "no edit reports unchanged" "false" "$(echo "$out" | jq -r '.changed')"
+check "no edit has no commit id" "" "$(echo "$out" | jq -r '.commit_id')"
+check "no edit creates no commit" "$before_no_change" "$(git -C "$WT" rev-parse HEAD)"
+check "result contains every required field" "0" "$(echo "$out" | jq '
+  ["status","coder","session_id","lifecycle_id","attempts","verification_mode",
+   "verification","verified","changed","commit_id","files_changed","worktree_clean",
+   "writer_stopped","result","diagnostic"] - keys | length')"
 
 out=$(MOCK_SESSION="sess-xyz-991" run --coder c-codex --verify-cmd "true" 2>/dev/null)
 check "reports the coder's real session id" "sess-xyz-991" "$(echo "$out" | jq -r '.session_id')"
@@ -77,7 +129,8 @@ check "retry result keeps the successful full pass" "2" "$(echo "$out" | jq '.ve
 # This is the single most likely porting bug: the old cc-delegate.sh ran
 # `eval "$VERIFY_CMD"` wherever it happened to be invoked from.
 out=$(cd "$TMP" && bash "$SCRIPT" --task-file "$task" --cwd "$WT" \
-      --coder c-codex --verify-cmd "pwd > $TMP/verify-cwd.txt" 2>/dev/null)
+      --commit-message "test: cwd" --coder c-codex \
+      --verify-cmd "pwd > $TMP/verify-cwd.txt" 2>/dev/null)
 check "verify ran in the worktree" "$WT" "$(cat "$TMP/verify-cwd.txt" 2>/dev/null)"
 
 # --- retry loop ---
@@ -92,6 +145,10 @@ check "exhausted retries is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')
 check "exhausted retries counts up"  "2"       "$(echo "$out" | jq -r '.attempts')"
 check "verify output is kept"        "1" \
   "$([[ -n "$(echo "$out" | jq -r '.verify_output')" ]] && echo 1 || echo 0)"
+clear_lifecycle
+check "coder success claim cannot override failed verification" "BLOCKED" \
+  "$(MOCK_RESULT='DONE, everything passed' run --coder c-codex --verify-cmd false --max-retries 0 2>/dev/null | jq -r '.status')"
+clear_lifecycle
 # Guards the fallback above: a verify command that DOES print must have its real
 # output propagated verbatim. Without this, removing the capture entirely still
 # passes, because the fallback alone satisfies a non-emptiness check. Verified:
@@ -99,9 +156,11 @@ check "verify output is kept"        "1" \
 out=$(run --coder c-codex --verify-cmd "echo distinctive-marker-8842; false" --max-retries 1 2>/dev/null)
 check "real verify output is propagated" "1" \
   "$([[ "$(echo "$out" | jq -r '.verify_output')" == *distinctive-marker-8842* ]] && echo 1 || echo 0)"
+clear_lifecycle
 
 run --coder c-codex --verify-cmd "false" --max-retries 1 >/dev/null 2>&1
 check "BLOCKED exits 1" "1" "$?"
+clear_lifecycle
 
 # --- edit mode is requested, not read-only ---
 log="$TMP/args.log"
@@ -118,10 +177,15 @@ rm -f "$log"
 # --- failures ---
 out=$(MOCK_FAIL_CLI=1 run --coder c-codex --verify-cmd "true" 2>/dev/null)
 check "tool failure is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+clear_lifecycle
 
-# A result with no session id means the tool never really ran.
-out=$(MOCK_SESSION="" run --coder c-cursor --verify-cmd "true" 2>/dev/null)
+# A result with no session id cannot commit even when the tool edited a file.
+before_missing_session=$(git -C "$WT" rev-parse HEAD)
+out=$(MOCK_SESSION="" MOCK_EDIT_FILE="$WT/no-session.txt" \
+      run --coder c-cursor --verify-cmd "true" 2>/dev/null)
 check "empty session id is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+check "empty session id creates no commit" "$before_missing_session" "$(git -C "$WT" rev-parse HEAD)"
+clear_lifecycle
 
 # --- argument validation ---
 bash "$SCRIPT" >/dev/null 2>&1
@@ -134,8 +198,24 @@ bash "$SCRIPT" --task-file "$task" --cwd /no/such --coder c-codex --verify-cmd "
 check "missing --cwd exits 2" "2" "$?"
 bash "$SCRIPT" --task-file "$task" --cwd "$TMP" --coder c-codex --verify-cmd "true" >/dev/null 2>&1
 check "--cwd outside a git repo exits 2" "2" "$?"
+run --coder c-codex --verify-cmd true --commit-message $'bad\nmessage' >/dev/null 2>&1
+check "multiline commit message exits 2" "2" "$?"
+bash "$SCRIPT" recover --cwd "$WT" --lifecycle-id 1-2-3 --force >/dev/null 2>&1
+check "recovery rejects unknown options" "2" "$?"
 run --coder nosuch --verify-cmd "true" >/dev/null 2>&1
 check "unknown coder exits 2" "2" "$?"
+
+primary_log="$TMP/primary-coder.log"
+MOCK_LOG="$primary_log" bash "$SCRIPT" --task-file "$task" --cwd "$MAIN" \
+  --commit-message "test: primary" --coder c-codex --verify-cmd true >/dev/null 2>&1
+check "primary checkout is rejected" "2" "$?"
+check "primary rejection does not invoke coder" "0" "$([[ ! -s "$primary_log" ]] && echo 0 || echo 1)"
+MOCK_LOG="$primary_log" bash "$SCRIPT" --task-file "$task" --cwd "$WT_MAIN" \
+  --commit-message "test: main" --coder c-codex --verify-cmd true >/dev/null 2>&1
+check "linked main branch is rejected" "2" "$?"
+MOCK_LOG="$primary_log" bash "$SCRIPT" --task-file "$task" --cwd "$WT_MASTER" \
+  --commit-message "test: master" --coder c-codex --verify-cmd true >/dev/null 2>&1
+check "linked master branch is rejected" "2" "$?"
 
 validation_log="$TMP/validation-coder.log"
 MOCK_LOG="$validation_log" run --coder c-codex --verify-cmd "" --verify-cmd "true" >/dev/null 2>&1
@@ -165,13 +245,24 @@ out=$(CSC_RUN_TIMEOUT=1 MOCK_SLEEP=5 run --coder c-codex --verify-cmd "true" 2>/
 check "timeout is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
 check "timeout says so in the output" "1" \
   "$([[ "$(echo "$out" | jq -r '.verify_output')" == *timed\ out* ]] && echo 1 || echo 0)"
+clear_lifecycle
 
 # --- a timeout must still report changes the coder left behind, not a
 # hardcoded false — a caller trusting changed:false may discard finished work.
-echo "left behind" > "$WT/timeout-leftover.txt"
-out=$(CSC_RUN_TIMEOUT=1 MOCK_SLEEP=5 run --coder c-codex --verify-cmd "true" 2>/dev/null)
+out=$(CSC_RUN_TIMEOUT=1 MOCK_SLEEP=5 MOCK_EDIT_FILE="$WT/timeout-leftover.txt" \
+      run --coder c-codex --verify-cmd "true" 2>/dev/null)
 check "timeout with dirty worktree reports changed:true" "true" "$(echo "$out" | jq -r '.changed')"
-rm -f "$WT/timeout-leftover.txt"
+timeout_lifecycle=$(echo "$out" | jq -r '.lifecycle_id')
+timeout_session=$(echo "$out" | jq -r '.session_id')
+out=$(run --coder c-codex --verify-cmd true 2>/dev/null)
+check "fresh task is refused while recovery state exists" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+out=$(run --coder c-codex --verify-cmd true --session "$timeout_session" --lifecycle-id 1-2-3 2>/dev/null)
+check "wrong lifecycle id cannot resume timeout work" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+out=$(run --coder c-codex --verify-cmd true --session "$timeout_session" \
+      --lifecycle-id "$timeout_lifecycle" 2>/dev/null)
+check "matching lifecycle resumes timeout work" "DONE" "$(echo "$out" | jq -r '.status')"
+check "resumed timeout work is committed" "timeout-leftover.txt" \
+  "$(echo "$out" | jq -r '.files_changed[0]')"
 
 # --- a timeout must still report the real session id, not an empty one —
 # every harness announces its session before doing any work, so a run killed
@@ -181,6 +272,7 @@ for k in c-cursor c-codex c-claude; do
         run --coder "$k" --verify-cmd "true" 2>/dev/null)
   check "$k timeout reports the real session id" "sess-timeout-$k" \
     "$(echo "$out" | jq -r '.session_id')"
+  clear_lifecycle
 done
 
 # --- verification timeout blocks without another coder pass ---
@@ -192,6 +284,100 @@ check "verification timeout is structured" "true" "$(echo "$out" | jq -r '.verif
 check "verification timeout preserves session" "sess-verify-timeout" "$(echo "$out" | jq -r '.session_id')"
 check "verification timeout does not retry coder" "1" \
   "$(grep -o 'ARGS:' "$verify_timeout_log" | wc -l | tr -d ' ')"
+clear_lifecycle
+
+# --- concurrent ownership: a second task never starts its coder ---
+first_out="$TMP/first-owner.json"
+first_log="$TMP/first-owner.log"
+second_log="$TMP/second-owner.log"
+CSC_RUN_TIMEOUT=2 MOCK_SLEEP=5 MOCK_LOG="$first_log" \
+  MOCK_EDIT_FILE="$WT/first-owner.txt" run --coder c-codex --verify-cmd true \
+  >"$first_out" 2>/dev/null &
+first_pid=$!
+private_git=$(git -C "$WT" rev-parse --absolute-git-dir)
+for _ in $(seq 1 50); do
+  [[ -f "$private_git/claude-subagents-coder.lock/owner.json" ]] && break
+  sleep 0.1
+done
+out=$(MOCK_LOG="$second_log" run --coder c-cursor --verify-cmd true 2>/dev/null)
+check "second lifecycle is blocked" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+check "second lifecycle does not invoke coder" "0" "$([[ ! -s "$second_log" ]] && echo 0 || echo 1)"
+check "second lifecycle preserves first edit" "delegated change" "$(cat "$WT/first-owner.txt")"
+wait "$first_pid" 2>/dev/null
+check "timed out first owner is blocked" "BLOCKED" "$(jq -r '.status' "$first_out")"
+clear_lifecycle
+
+# --- a lingering child is killed and the task is blocked ---
+linger_pid_file="$TMP/linger.pid"
+out=$(MOCK_LINGER_PID_FILE="$linger_pid_file" MOCK_LINGER_SECONDS=300 \
+      run --coder c-codex --verify-cmd true 2>/dev/null)
+linger_pid=$(cat "$linger_pid_file")
+check "lingering writer is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+check "lingering writer is stopped" "0" "$(kill -0 "$linger_pid" 2>/dev/null && echo 1 || echo 0)"
+clear_lifecycle
+
+# --- an unconfirmed shutdown quarantines until explicit recovery ---
+out=$(TIMEOUT_TEST_FORCE_UNCONTAINED=1 run --coder c-codex --verify-cmd true 2>/dev/null)
+quarantine_lifecycle=$(echo "$out" | jq -r '.lifecycle_id')
+quarantine_session=$(echo "$out" | jq -r '.session_id')
+check "unconfirmed shutdown is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+check "unconfirmed shutdown retains quarantine lock" "1" \
+  "$([[ -d "$private_git/claude-subagents-coder.lock" ]] && echo 1 || echo 0)"
+out=$(bash "$SCRIPT" recover --cwd "$WT" --lifecycle-id "$quarantine_lifecycle" 2>/dev/null)
+check "stopped quarantine can be recovered" "RECOVERED" "$(echo "$out" | jq -r '.status')"
+out=$(run --coder c-codex --verify-cmd true --session "$quarantine_session" \
+      --lifecycle-id "$quarantine_lifecycle" 2>/dev/null)
+check "recovered lifecycle can resume" "DONE" "$(echo "$out" | jq -r '.status')"
+
+# --- coder-owned Git changes are preserved and quarantined ---
+WT_TAMPER="$TMP/tamper-work"
+git -C "$MAIN" worktree add -q -b feature/tamper "$WT_TAMPER" main
+tamper_start=$(git -C "$WT_TAMPER" rev-parse HEAD)
+out=$(MOCK_EDIT_FILE="$WT_TAMPER/coder-commit.txt" \
+      MOCK_GIT_COMMAND="git add -A && git commit -q -m coder-owned" \
+      bash "$SCRIPT" --task-file "$task" --cwd "$WT_TAMPER" \
+        --commit-message "test: caller" --coder c-codex --verify-cmd true 2>/dev/null)
+tamper_git=$(git -C "$WT_TAMPER" rev-parse --absolute-git-dir)
+check "coder-created commit is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+check "coder-created commit is preserved" "1" \
+  "$([[ "$(git -C "$WT_TAMPER" rev-parse HEAD)" != "$tamper_start" ]] && echo 1 || echo 0)"
+check "coder-created commit quarantines worktree" "1" \
+  "$([[ -d "$tamper_git/claude-subagents-coder.lock" ]] && echo 1 || echo 0)"
+
+WT_SWITCH="$TMP/switch-work"
+git -C "$MAIN" worktree add -q -b feature/switch "$WT_SWITCH" main
+out=$(MOCK_GIT_COMMAND="git switch -q -c feature/coder-switched" \
+      bash "$SCRIPT" --task-file "$task" --cwd "$WT_SWITCH" \
+        --commit-message "test: caller" --coder c-codex --verify-cmd true 2>/dev/null)
+check "coder branch switch is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+check "coder branch switch is preserved" "feature/coder-switched" \
+  "$(git -C "$WT_SWITCH" branch --show-current)"
+
+# --- failed and dirty commits preserve work for inspection ---
+hooks="$TMP/hooks"
+mkdir -p "$hooks"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$hooks/pre-commit"
+chmod +x "$hooks/pre-commit"
+git -C "$WT" config core.hooksPath "$hooks"
+before_failed_commit=$(git -C "$WT" rev-parse HEAD)
+out=$(MOCK_EDIT_FILE="$WT/commit-failed.txt" run --coder c-codex --verify-cmd true 2>/dev/null)
+check "failed commit is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+check "failed commit preserves file" "delegated change" "$(cat "$WT/commit-failed.txt")"
+check "failed commit does not rewrite history" "$before_failed_commit" "$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" config --unset core.hooksPath
+clear_lifecycle
+
+rm -f "$hooks/pre-commit"
+printf '#!/usr/bin/env bash\nprintf "hook change\\n" > hook-leftover.txt\n' > "$hooks/post-commit"
+chmod +x "$hooks/post-commit"
+git -C "$WT" config core.hooksPath "$hooks"
+out=$(MOCK_EDIT_FILE="$WT/commit-with-hook.txt" run --coder c-codex --verify-cmd true 2>/dev/null)
+check "hook leftover is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+check "hook-created commit is preserved" "1" \
+  "$([[ -n "$(echo "$out" | jq -r '.commit_id')" ]] && echo 1 || echo 0)"
+check "hook leftover is preserved" "hook change" "$(cat "$WT/hook-leftover.txt")"
+git -C "$WT" config --unset core.hooksPath
+clear_lifecycle
 
 rm -rf "$WT"
 echo "---"
