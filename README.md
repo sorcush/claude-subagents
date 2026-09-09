@@ -34,25 +34,31 @@ Each entry has this shape:
 See the shipped pool files for the current entries. Run `make models` to print both
 pools.
 
-## Subagents and commands
+## Commands and workers
 
-| Subagent | Command | Role |
+| Worker | Command | Role |
 |---|---|---|
 | `reviewer-delegator` | `/review <spec\|plan> <doc-path> [spec-path]` | Runs a read-only review and relays the report verbatim. Cannot author or judge. |
-| `coder-delegator` | `/implement-plans <plan-path>` | Shells to a coder in an isolated worktree, runs verify, loops, commits, reports. No code-editing tools. |
+| Direct coder lifecycle | `/implement-plans <plan-path>` | Runs the chosen coder synchronously in an isolated worktree, verifies its work, commits successful changes, and reports observed state. |
 
 Both commands read the pool at run time and **ask which worker to use** before
-dispatching. There are no tool-specific command aliases.
+starting work. There are no tool-specific command aliases.
 
 For reviews, the controller triages findings via `superpowers:receiving-code-review`.
 For implementation, the controller follows `superpowers:subagent-driven-development`
-with the coder as the implementer.
+while the direct lifecycle runs the coder as the implementer.
 
 ## Worktree isolation
 
 When you run `/implement-plans`, the coder works in a sibling git worktree named
 `<feature-branch>-work`, not in your main checkout. After each task passes review,
 reviewed commits are fast-forwarded onto the feature branch.
+
+Only one coding task owns the plan worktree at a time. The next task starts only after
+the previous coder and its child processes have stopped, verification has completed,
+and any changes have been committed. A timeout preserves partial work and stops the
+plan. If shutdown cannot be confirmed, the worktree is quarantined until explicit
+recovery succeeds.
 
 Dependency folders listed in the worktree script are brought across as isolated
 copies — copy-on-write clones where the filesystem supports them, ordinary copies
@@ -162,6 +168,8 @@ bash tests/test-pool.sh              # pool loading and listing
 bash tests/test-probe.sh             # probe failure classification
 bash tests/test-review-delegate.sh   # reviewer delegate unit tests (mock harnesses)
 bash tests/test-code-delegate.sh     # coder delegate unit tests (mock harnesses)
+bash tests/test-coder-lifecycle.sh   # exclusive ownership and recovery tests
+bash tests/test-code-result.sh       # lifecycle result-contract validation
 bash tests/test-worktree.sh          # worktree prepare/remove lifecycle
 bash tests/test-worktree-isolation.sh # main checkout isolation guarantee
 bash tests/test-timeout.sh           # bounded timeouts on external calls
@@ -171,3 +179,8 @@ bash tests/test-update-changelog.sh  # idempotent changelog file writes
 ```
 
 See `tests/e2e-smoke.md` for manual end-to-end checks against real tools.
+
+The ownership state is managed by `scripts/lib/coder-lifecycle.sh`. The controller
+accepts coder output only after `scripts/validate-code-result.sh` confirms that the
+process stopped, verification status is coherent, and successful changes have a
+commit.
