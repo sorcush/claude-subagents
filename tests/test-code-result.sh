@@ -53,16 +53,26 @@ validate "$valid_blocked" 0
 check "BLOCKED requires exit one" "2" "$?"
 validate "$(echo "$valid_changed" | jq -c '.session_id=""')" 0
 check "DONE requires a session" "2" "$?"
+validate "$(echo "$valid_changed" | jq -c '.lifecycle_id=""')" 0
+check "DONE requires a lifecycle id" "2" "$?"
 validate "$(echo "$valid_changed" | jq -c '.writer_stopped=false')" 0
 check "DONE requires stopped writer" "2" "$?"
 validate "$(echo "$valid_changed" | jq -c '.worktree_clean=false')" 0
 check "DONE requires clean worktree" "2" "$?"
 validate "$(echo "$valid_changed" | jq -c '.verified=false')" 0
 check "command verification must pass" "2" "$?"
+validate "$(echo "$valid_changed" | jq -c '.verification[0].timed_out=true')" 0
+check "timed out verification cannot pass" "2" "$?"
+validate "$(echo "$valid_changed" | jq -c '.verification[0].exit_code=1')" 0
+check "failed verification cannot pass" "2" "$?"
 validate "$(echo "$valid_changed" | jq -c '.commit_id=""')" 0
 check "changed DONE requires commit" "2" "$?"
 validate "$(echo "$valid_unchanged" | jq -c '.commit_id="abc123"')" 0
 check "unchanged DONE forbids commit" "2" "$?"
+validate "$(echo "$valid_unchanged" | jq -c '.files_changed=["ghost.txt"]')" 0
+check "unchanged DONE forbids changed paths" "2" "$?"
+validate "$(echo "$valid_unchanged" | jq -c '.verified=true')" 0
+check "no-verification mode stays unverified" "2" "$?"
 
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"

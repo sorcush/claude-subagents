@@ -25,6 +25,9 @@ input_error() {
   exit 2
 }
 
+[[ "${BASH_VERSINFO[0]:-0}" -ge 4 ]] \
+  || input_error "code-delegate requires Bash 4 or newer"
+
 json_changed_paths() {
   {
     if [[ -n "$LIFECYCLE_START_COMMIT" ]] \
@@ -135,7 +138,8 @@ else
       || input_error "empty verification cannot be mixed with verification commands"
     bash -n -c "$verify_command" >/dev/null 2>&1 \
       || input_error "invalid shell syntax in --verify-cmd"
-    if [[ "$verify_command" =~ ^[[:space:]]*[[:alnum:]_.-]+:[[:space:]] ]]; then
+    label_pattern='^[[:space:]]*[[:alnum:]_.-]+:([[:space:]]|$)'
+    if [[ "$verify_command" =~ $label_pattern ]]; then
       input_error "verification commands cannot start with a label; remove text such as server: or client: and pass each command with its own --verify-cmd"
     fi
   done
@@ -207,7 +211,15 @@ unexpected_exit() {
   fi
   return "$rc"
 }
-trap unexpected_exit EXIT INT TERM
+handle_signal() {
+  local signal="$1" status="$2"
+  trap - INT TERM
+  DIAGNOSTIC="delegate interrupted by $signal"
+  exit "$status"
+}
+trap unexpected_exit EXIT
+trap 'handle_signal INT 130' INT
+trap 'handle_signal TERM 143' TERM
 
 block_result() {
   DIAGNOSTIC="$1"
@@ -244,6 +256,7 @@ fi
 LIFECYCLE_OWNED=1
 RUN_GROUP_STOPPED=1
 WRITER_STOPPED=true
+RUN_GROUP_RECORD_FILE="$LIFECYCLE_LOCK_DIR/process_group_id"
 
 if [[ -n "$REQUESTED_LIFECYCLE_ID" ]]; then
   if [[ -z "$SESSION" || -z "$LIFECYCLE_SESSION_ID" || "$SESSION" != "$LIFECYCLE_SESSION_ID" ]]; then
@@ -376,8 +389,16 @@ fi
 
 STATUS="DONE"
 DIAGNOSTIC=""
-emit_result
-lifecycle_finish
+if ! lifecycle_finish; then
+  STATUS="BLOCKED"
+  DIAGNOSTIC="task completed but lifecycle ownership could not be released"
+  refresh_observed
+  emit_result
+  LIFECYCLE_FINALIZED=1
+  rm -f "$ERR_FILE"
+  exit 1
+fi
 LIFECYCLE_FINALIZED=1
+emit_result
 rm -f "$ERR_FILE"
 exit 0

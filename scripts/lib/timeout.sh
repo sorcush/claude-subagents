@@ -81,6 +81,9 @@ run_with_timeout_in() {
   ( cd "$dir" && exec "$@" ) &
   pid=$!
   RUN_GROUP_ID="$pid"
+  if [[ -n "${RUN_GROUP_RECORD_FILE:-}" ]]; then
+    printf '%s\n' "$RUN_GROUP_ID" > "$RUN_GROUP_RECORD_FILE"
+  fi
   [[ "$monitor_was_on" -eq 1 ]] || set +m
 
   {

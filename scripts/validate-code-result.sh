@@ -64,11 +64,15 @@ status=$(jq -r '.status' <<<"$line")
 if [[ "$status" == DONE ]]; then
   jq -e '
     (.session_id | length > 0) and
+    (.lifecycle_id | length > 0) and
     (.writer_stopped == true) and
     (.worktree_clean == true) and
-    ((.verification_mode == "none") or (.verified == true)) and
+    ((.verification_mode == "none" and .verified == false and (.verification|length)==0) or
+     (.verification_mode == "commands" and .verified == true and
+      (.verification|length)>0 and
+      (.verification|all(.[]; .exit_code==0 and .timed_out==false)))) and
     ((.changed == true and (.commit_id | length > 0)) or
-     (.changed == false and (.commit_id | length == 0)))
+     (.changed == false and (.commit_id | length == 0) and (.files_changed|length)==0))
   ' <<<"$line" >/dev/null 2>&1 || invalid "DONE invariants are not satisfied"
 fi
 

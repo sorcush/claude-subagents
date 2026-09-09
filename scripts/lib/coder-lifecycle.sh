@@ -118,13 +118,17 @@ lifecycle_release_lock() {
   [[ -d "$LIFECYCLE_LOCK_DIR" ]] || return 0
   [[ -r "$owner_file" ]] && owner_id="$(jq -r '.lifecycle_id // ""' "$owner_file" 2>/dev/null)"
   [[ "$owner_id" == "$LIFECYCLE_ID" ]] || return 1
-  rm -f "$owner_file"
+  rm -f "$owner_file" "$LIFECYCLE_LOCK_DIR/process_group_id"
   rmdir "$LIFECYCLE_LOCK_DIR"
 }
 
 lifecycle_open() {  # <cwd> <coder> <resume-lifecycle-id>
   local cwd="$1" coder="$2" resume_id="${3:-}" state_id state_coder state_name
   local recorded_worktree recorded_branch recorded_commit recorded_files current_files owner_tmp owner_pid
+  if [[ "${BASH_VERSINFO[0]:-0}" -lt 4 ]]; then
+    LIFECYCLE_DIAGNOSTIC="coder lifecycle requires Bash 4 or newer"
+    return 2
+  fi
   lifecycle_resolve_paths "$cwd" || return 1
   [[ -n "$coder" ]] || { LIFECYCLE_DIAGNOSTIC="coder key is required"; return 2; }
   if [[ -n "$resume_id" && ! "$resume_id" =~ ^[0-9]+-[0-9]+-[0-9]+$ ]]; then
@@ -163,6 +167,10 @@ lifecycle_open() {  # <cwd> <coder> <resume-lifecycle-id>
     LIFECYCLE_SESSION_ID="$(jq -r '.session_id // ""' "$LIFECYCLE_STATE_FILE")"
     LIFECYCLE_START_BRANCH="$(jq -r '.start_branch // .branch // ""' "$LIFECYCLE_STATE_FILE")"
     LIFECYCLE_START_COMMIT="$(jq -r '.start_commit // .observed_commit // ""' "$LIFECYCLE_STATE_FILE")"
+    if [[ "$recorded_commit" != "$LIFECYCLE_START_COMMIT" ]]; then
+      LIFECYCLE_START_BRANCH="$recorded_branch"
+      LIFECYCLE_START_COMMIT="$recorded_commit"
+    fi
     LIFECYCLE_ATTEMPTS="$(jq -r '.attempts // 0' "$LIFECYCLE_STATE_FILE")"
   else
     if [[ -n "$resume_id" ]]; then
@@ -192,8 +200,8 @@ lifecycle_open() {  # <cwd> <coder> <resume-lifecycle-id>
 }
 
 lifecycle_finish() {
+  lifecycle_release_lock || return 1
   [[ -n "$LIFECYCLE_STATE_FILE" ]] && rm -f "$LIFECYCLE_STATE_FILE"
-  lifecycle_release_lock
 }
 
 lifecycle_block_recoverable() {  # <diagnostic>
@@ -212,7 +220,7 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
   local cwd="$1" requested_id="$2"
   local state_id state_name owner_pid owner_started pgid recorded_worktree
   local recorded_branch recorded_commit recorded_files current_files tmp recovery_pid
-  local start_branch start_commit integrity_violation=0 restored_files
+  local start_branch start_commit integrity_violation=0 restored_files commit_files
   lifecycle_resolve_paths "$cwd" || return 1
   [[ "$requested_id" =~ ^[0-9]+-[0-9]+-[0-9]+$ ]] \
     || { LIFECYCLE_DIAGNOSTIC="invalid lifecycle id"; return 2; }
@@ -232,6 +240,9 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
   owner_pid="$(jq -r '.owner_pid // 0' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
   owner_started="$(jq -r '.owner_started // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
   pgid="$(jq -r '.process_group_id // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
+  if [[ -z "$pgid" && -r "$LIFECYCLE_LOCK_DIR/process_group_id" ]]; then
+    pgid="$(<"$LIFECYCLE_LOCK_DIR/process_group_id")"
+  fi
   recorded_worktree="$(jq -r '.worktree // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
   recorded_branch="$(jq -r '.branch // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
   recorded_commit="$(jq -r '.observed_commit // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
@@ -247,13 +258,15 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
   if [[ "$integrity_violation" -eq 1 ]] \
      && git -C "$LIFECYCLE_WORKTREE" cat-file -e "$start_commit^{commit}" 2>/dev/null \
      && git -C "$LIFECYCLE_WORKTREE" cat-file -e "$recorded_commit^{commit}" 2>/dev/null; then
-    restored_files="$({
-      printf '%s' "$recorded_files" | jq -r '.[]' | while IFS= read -r path; do printf '%s\0' "$path"; done
-      git -C "$LIFECYCLE_WORKTREE" diff --name-only -z "$start_commit..$recorded_commit" 2>/dev/null
-    } | jq -Rs 'split("\u0000") | map(select(length > 0)) | unique' | jq -cS .)"
+    commit_files="$(git -C "$LIFECYCLE_WORKTREE" diff --name-only -z \
+      "$start_commit..$recorded_commit" 2>/dev/null \
+      | jq -Rs 'split("\u0000") | map(select(length > 0)) | unique')"
+    restored_files="$(jq -cn --argjson recorded "$recorded_files" \
+      --argjson committed "$commit_files" '$recorded + $committed | unique' | jq -cS .)"
   fi
 
-  if [[ "$state_id" != "$requested_id" || "$state_name" != quarantined \
+  if [[ "$state_id" != "$requested_id" \
+        || ( "$state_name" != quarantined && "$state_name" != active ) \
         || "$recorded_worktree" != "$LIFECYCLE_WORKTREE" ]]; then
     LIFECYCLE_DIAGNOSTIC="quarantine state does not match this recovery"
     rmdir "$LIFECYCLE_RECOVERY_LOCK"
@@ -304,7 +317,8 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
     }
   mv "$tmp" "$LIFECYCLE_STATE_FILE"
   if [[ -d "$LIFECYCLE_LOCK_DIR" ]]; then
-    rm -f "$LIFECYCLE_LOCK_DIR/owner.json" "$LIFECYCLE_LOCK_DIR/owner.json.tmp"
+    rm -f "$LIFECYCLE_LOCK_DIR/owner.json" "$LIFECYCLE_LOCK_DIR/owner.json.tmp" \
+      "$LIFECYCLE_LOCK_DIR/process_group_id"
     rmdir "$LIFECYCLE_LOCK_DIR" || {
       LIFECYCLE_DIAGNOSTIC="stale live lock could not be removed"
       rmdir "$LIFECYCLE_RECOVERY_LOCK"

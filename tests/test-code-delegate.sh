@@ -230,6 +230,12 @@ check "human label does not invoke the coder" "0" \
   "$([[ ! -s "$validation_log" ]] && echo 0 || echo 1)"
 
 rm -f "$validation_log"
+MOCK_LOG="$validation_log" run --coder c-codex --verify-cmd "server:" >/dev/null 2>&1
+check "bare human label is rejected before coder invocation" "2" "$?"
+check "bare human label does not invoke the coder" "0" \
+  "$([[ ! -s "$validation_log" ]] && echo 0 || echo 1)"
+
+rm -f "$validation_log"
 MOCK_LOG="$validation_log" run --coder c-codex --verify-cmd "if then" >/dev/null 2>&1
 check "invalid shell syntax is rejected" "2" "$?"
 check "invalid shell syntax does not invoke the coder" "0" \
@@ -239,6 +245,16 @@ for bad in "-1" "" "abc" "3+3"; do
   run --coder c-codex --verify-cmd "true" --max-retries "$bad" >/dev/null 2>&1
   check "--max-retries '$bad' exits 2" "2" "$?"
 done
+
+system_bash_major=$(/bin/bash -c 'printf %s "${BASH_VERSINFO[0]:-0}"')
+if [[ "$system_bash_major" -lt 4 ]]; then
+  /bin/bash "$SCRIPT" >/dev/null 2>&1
+  check "old Bash is rejected before lifecycle state" "2" "$?"
+  check "old Bash creates no lifecycle lock" "0" \
+    "$([[ -d "$(git -C "$WT" rev-parse --absolute-git-dir)/claude-subagents-coder.lock" ]] && echo 1 || echo 0)"
+else
+  check "Bash preflight is supported on this host" "1" "1"
+fi
 
 # --- a timeout is reported as such, not as a generic failure ---
 out=$(CSC_RUN_TIMEOUT=1 MOCK_SLEEP=5 run --coder c-codex --verify-cmd "true" 2>/dev/null)
@@ -307,6 +323,58 @@ wait "$first_pid" 2>/dev/null
 check "timed out first owner is blocked" "BLOCKED" "$(jq -r '.status' "$first_out")"
 clear_lifecycle
 
+# --- an interrupt stops the active writer before releasing ownership ---
+WT_SIGNAL="$TMP/signal-work"
+git -C "$MAIN" worktree add -q -b feature/signal "$WT_SIGNAL" main
+signal_out="$TMP/signal-owner.json"
+MOCK_SLEEP=30 bash "$SCRIPT" --task-file "$task" --cwd "$WT_SIGNAL" \
+  --commit-message "test: signal" --coder c-codex --verify-cmd true \
+  >"$signal_out" 2>/dev/null &
+signal_owner=$!
+signal_git=$(git -C "$WT_SIGNAL" rev-parse --absolute-git-dir)
+for _ in $(seq 1 50); do
+  signal_pgid=$(cat "$signal_git/claude-subagents-coder.lock/process_group_id" 2>/dev/null)
+  [[ -n "$signal_pgid" ]] && break
+  sleep 0.1
+done
+kill -TERM "$signal_owner" 2>/dev/null
+wait "$signal_owner" 2>/dev/null
+check "interrupted lifecycle is BLOCKED" "BLOCKED" "$(jq -r '.status' "$signal_out")"
+check "interrupted writer group is stopped" "0" \
+  "$(kill -0 -"$signal_pgid" 2>/dev/null && echo 1 || echo 0)"
+check "interrupted lifecycle releases live lock" "0" \
+  "$([[ -d "$signal_git/claude-subagents-coder.lock" ]] && echo 1 || echo 0)"
+clear_lifecycle_at "$WT_SIGNAL"
+
+# --- an abrupt controller death leaves an active record until the writer stops ---
+WT_CRASH="$TMP/crash-work"
+git -C "$MAIN" worktree add -q -b feature/crash "$WT_CRASH" main
+crash_out="$TMP/crash-owner.json"
+MOCK_SLEEP=30 bash "$SCRIPT" --task-file "$task" --cwd "$WT_CRASH" \
+  --commit-message "test: crash" --coder c-codex --verify-cmd true \
+  >"$crash_out" 2>/dev/null &
+crash_owner=$!
+crash_git=$(git -C "$WT_CRASH" rev-parse --absolute-git-dir)
+for _ in $(seq 1 50); do
+  crash_pgid=$(cat "$crash_git/claude-subagents-coder.lock/process_group_id" 2>/dev/null)
+  [[ -n "$crash_pgid" ]] && break
+  sleep 0.1
+done
+crash_lifecycle=$(jq -r '.lifecycle_id' "$crash_git/claude-subagents-coder-state.json")
+kill -KILL "$crash_owner" 2>/dev/null
+wait "$crash_owner" 2>/dev/null
+out=$(bash "$SCRIPT" recover --cwd "$WT_CRASH" --lifecycle-id "$crash_lifecycle" 2>/dev/null)
+check "crashed active lifecycle refuses recovery while writer lives" "BLOCKED" \
+  "$(echo "$out" | jq -r '.status')"
+kill -TERM -"$crash_pgid" 2>/dev/null
+for _ in $(seq 1 50); do
+  kill -0 -"$crash_pgid" 2>/dev/null || break
+  sleep 0.1
+done
+out=$(bash "$SCRIPT" recover --cwd "$WT_CRASH" --lifecycle-id "$crash_lifecycle" 2>/dev/null)
+check "stale active lifecycle can be recovered" "RECOVERED" "$(echo "$out" | jq -r '.status')"
+clear_lifecycle_at "$WT_CRASH"
+
 # --- a lingering child is killed and the task is blocked ---
 linger_pid_file="$TMP/linger.pid"
 out=$(MOCK_LINGER_PID_FILE="$linger_pid_file" MOCK_LINGER_SECONDS=300 \
@@ -333,7 +401,8 @@ check "recovered lifecycle can resume" "DONE" "$(echo "$out" | jq -r '.status')"
 WT_TAMPER="$TMP/tamper-work"
 git -C "$MAIN" worktree add -q -b feature/tamper "$WT_TAMPER" main
 tamper_start=$(git -C "$WT_TAMPER" rev-parse HEAD)
-out=$(MOCK_EDIT_FILE="$WT_TAMPER/coder-commit.txt" \
+tamper_file="$WT_TAMPER/"$'coder\ncommit.txt'
+out=$(MOCK_EDIT_FILE="$tamper_file" \
       MOCK_GIT_COMMAND="git add -A && git commit -q -m coder-owned" \
       bash "$SCRIPT" --task-file "$task" --cwd "$WT_TAMPER" \
         --commit-message "test: caller" --coder c-codex --verify-cmd true 2>/dev/null)
@@ -349,7 +418,7 @@ check "coder-created commit cannot be recovered in place" "1" "$?"
 git -C "$WT_TAMPER" reset --mixed -q "$tamper_start"
 out=$(bash "$SCRIPT" recover --cwd "$WT_TAMPER" --lifecycle-id "$tamper_lifecycle" 2>/dev/null)
 check "restored coder commit can be recovered" "RECOVERED" "$(echo "$out" | jq -r '.status')"
-check "recovery retains coder commit changes" "delegated change" "$(cat "$WT_TAMPER/coder-commit.txt")"
+check "recovery retains coder commit changes with newline path" "delegated change" "$(cat "$tamper_file")"
 clear_lifecycle_at "$WT_TAMPER"
 
 WT_SWITCH="$TMP/switch-work"
@@ -391,8 +460,28 @@ check "hook leftover is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
 check "hook-created commit is preserved" "1" \
   "$([[ -n "$(echo "$out" | jq -r '.commit_id')" ]] && echo 1 || echo 0)"
 check "hook leftover is preserved" "hook change" "$(cat "$WT/hook-leftover.txt")"
+hook_lifecycle=$(echo "$out" | jq -r '.lifecycle_id')
+hook_session=$(echo "$out" | jq -r '.session_id')
 git -C "$WT" config --unset core.hooksPath
-clear_lifecycle
+out=$(run --coder c-codex --verify-cmd true --session "$hook_session" \
+      --lifecycle-id "$hook_lifecycle" 2>/dev/null)
+check "hook-leftover lifecycle can resume" "DONE" "$(echo "$out" | jq -r '.status')"
+check "resumed hook leftover is committed" "hook-leftover.txt" \
+  "$(echo "$out" | jq -r '.files_changed[0]')"
+
+# --- completion never reports DONE if ownership release fails ---
+WT_FINALIZE="$TMP/finalize-work"
+git -C "$MAIN" worktree add -q -b feature/finalize "$WT_FINALIZE" main
+out=$(MOCK_EDIT_FILE="$WT_FINALIZE/finalize.txt" MOCK_CORRUPT_LOCK=1 \
+      bash "$SCRIPT" --task-file "$task" --cwd "$WT_FINALIZE" \
+        --commit-message "test: finalize" --coder c-codex --verify-cmd true 2>/dev/null)
+finalize_git=$(git -C "$WT_FINALIZE" rev-parse --absolute-git-dir)
+check "failed ownership release is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+check "failed ownership release retains state" "1" \
+  "$([[ -f "$finalize_git/claude-subagents-coder-state.json" ]] && echo 1 || echo 0)"
+check "failed ownership release retains lock" "1" \
+  "$([[ -d "$finalize_git/claude-subagents-coder.lock" ]] && echo 1 || echo 0)"
+clear_lifecycle_at "$WT_FINALIZE"
 
 rm -rf "$WT"
 echo "---"
