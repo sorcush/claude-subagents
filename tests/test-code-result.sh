@@ -53,6 +53,8 @@ validate "$valid_blocked" 0
 check "BLOCKED requires exit one" "2" "$?"
 validate "$(echo "$valid_changed" | jq -c '.session_id=""')" 0
 check "DONE requires a session" "2" "$?"
+validate "$(echo "$valid_changed" | jq -c '.coder=""')" 0
+check "DONE requires a coder" "2" "$?"
 validate "$(echo "$valid_changed" | jq -c '.lifecycle_id=""')" 0
 check "DONE requires a lifecycle id" "2" "$?"
 validate "$(echo "$valid_changed" | jq -c '.writer_stopped=false')" 0
@@ -67,6 +69,8 @@ validate "$(echo "$valid_changed" | jq -c '.verification[0].exit_code=1')" 0
 check "failed verification cannot pass" "2" "$?"
 validate "$(echo "$valid_changed" | jq -c '.commit_id=""')" 0
 check "changed DONE requires commit" "2" "$?"
+validate "$(echo "$valid_changed" | jq -c '.files_changed=[]')" 0
+check "changed DONE requires changed paths" "2" "$?"
 validate "$(echo "$valid_unchanged" | jq -c '.commit_id="abc123"')" 0
 check "unchanged DONE forbids commit" "2" "$?"
 validate "$(echo "$valid_unchanged" | jq -c '.files_changed=["ghost.txt"]')" 0

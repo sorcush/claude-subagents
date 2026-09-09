@@ -8,6 +8,7 @@ LIFECYCLE_GIT_DIR=""
 LIFECYCLE_LOCK_DIR=""
 LIFECYCLE_STATE_FILE=""
 LIFECYCLE_RECOVERY_LOCK=""
+LIFECYCLE_GUARD_FD=""
 LIFECYCLE_DIAGNOSTIC=""
 LIFECYCLE_CODER=""
 LIFECYCLE_SESSION_ID=""
@@ -17,6 +18,8 @@ LIFECYCLE_STARTED_AT=""
 LIFECYCLE_OWNER_STARTED=""
 LIFECYCLE_START_BRANCH=""
 LIFECYCLE_START_COMMIT=""
+LIFECYCLE_EXPECTED_BRANCH=""
+LIFECYCLE_EXPECTED_COMMIT=""
 LIFECYCLE_ATTEMPTS=0
 
 lifecycle_resolve_paths() {  # <cwd>
@@ -113,6 +116,32 @@ lifecycle_update() {
   lifecycle_write_state "$@"
 }
 
+lifecycle_guard_acquire() {
+  [[ -z "$LIFECYCLE_GUARD_FD" ]] \
+    || { LIFECYCLE_DIAGNOSTIC="recovery guard is already held by this process"; return 1; }
+  exec {LIFECYCLE_GUARD_FD}> "$LIFECYCLE_RECOVERY_LOCK" 2>/dev/null \
+    || { LIFECYCLE_GUARD_FD=""; LIFECYCLE_DIAGNOSTIC="cannot open recovery guard"; return 1; }
+  if command -v flock >/dev/null 2>&1; then
+    flock -n "$LIFECYCLE_GUARD_FD" 2>/dev/null && return 0
+  elif command -v lockf >/dev/null 2>&1; then
+    lockf -s -t 0 "$LIFECYCLE_GUARD_FD" 2>/dev/null && return 0
+  else
+    LIFECYCLE_DIAGNOSTIC="no supported advisory lock command is installed"
+    lifecycle_guard_release >/dev/null 2>&1 || true
+    return 1
+  fi
+  LIFECYCLE_DIAGNOSTIC="recovery is already in progress"
+  lifecycle_guard_release >/dev/null 2>&1 || true
+  return 1
+}
+
+lifecycle_guard_release() {
+  local fd="$LIFECYCLE_GUARD_FD"
+  [[ "$fd" =~ ^[0-9]+$ ]] || return 1
+  eval "exec ${fd}>&-"
+  LIFECYCLE_GUARD_FD=""
+}
+
 lifecycle_release_lock() {
   local owner_file="$LIFECYCLE_LOCK_DIR/owner.json" owner_id=""
   [[ -d "$LIFECYCLE_LOCK_DIR" ]] || return 0
@@ -167,10 +196,8 @@ lifecycle_open() {  # <cwd> <coder> <resume-lifecycle-id>
     LIFECYCLE_SESSION_ID="$(jq -r '.session_id // ""' "$LIFECYCLE_STATE_FILE")"
     LIFECYCLE_START_BRANCH="$(jq -r '.start_branch // .branch // ""' "$LIFECYCLE_STATE_FILE")"
     LIFECYCLE_START_COMMIT="$(jq -r '.start_commit // .observed_commit // ""' "$LIFECYCLE_STATE_FILE")"
-    if [[ "$recorded_commit" != "$LIFECYCLE_START_COMMIT" ]]; then
-      LIFECYCLE_START_BRANCH="$recorded_branch"
-      LIFECYCLE_START_COMMIT="$recorded_commit"
-    fi
+    LIFECYCLE_EXPECTED_BRANCH="$recorded_branch"
+    LIFECYCLE_EXPECTED_COMMIT="$recorded_commit"
     LIFECYCLE_ATTEMPTS="$(jq -r '.attempts // 0' "$LIFECYCLE_STATE_FILE")"
   else
     if [[ -n "$resume_id" ]]; then
@@ -186,6 +213,8 @@ lifecycle_open() {  # <cwd> <coder> <resume-lifecycle-id>
     LIFECYCLE_ID="$(date -u +%s)-$BASHPID-$RANDOM"
     LIFECYCLE_START_BRANCH="$(git -C "$LIFECYCLE_WORKTREE" branch --show-current)"
     LIFECYCLE_START_COMMIT="$(git -C "$LIFECYCLE_WORKTREE" rev-parse HEAD)"
+    LIFECYCLE_EXPECTED_BRANCH="$LIFECYCLE_START_BRANCH"
+    LIFECYCLE_EXPECTED_COMMIT="$LIFECYCLE_START_COMMIT"
     LIFECYCLE_SESSION_ID=""
     LIFECYCLE_ATTEMPTS=0
   fi
@@ -196,42 +225,57 @@ lifecycle_open() {  # <cwd> <coder> <resume-lifecycle-id>
     '{lifecycle_id:$id,owner_pid:$pid,owner_started:$started,worktree:$worktree}' \
     > "$owner_tmp" || return 1
   mv "$owner_tmp" "$LIFECYCLE_LOCK_DIR/owner.json"
-  lifecycle_write_state active "$LIFECYCLE_SESSION_ID" "" true ""
+  lifecycle_write_state admitted "$LIFECYCLE_SESSION_ID" "" true ""
 }
 
 lifecycle_finish() {
-  lifecycle_release_lock || return 1
+  lifecycle_guard_acquire || return 1
+  if ! lifecycle_release_lock; then
+    lifecycle_guard_release >/dev/null 2>&1 || true
+    return 1
+  fi
   [[ -n "$LIFECYCLE_STATE_FILE" ]] && rm -f "$LIFECYCLE_STATE_FILE"
+  lifecycle_guard_release
 }
 
 lifecycle_block_recoverable() {  # <diagnostic>
+  lifecycle_guard_acquire || return 1
   lifecycle_write_state recoverable "$LIFECYCLE_SESSION_ID" \
-    "$LIFECYCLE_PROCESS_GROUP_ID" true "$1" || return 1
-  lifecycle_release_lock
+    "$LIFECYCLE_PROCESS_GROUP_ID" true "$1" || {
+      lifecycle_guard_release >/dev/null 2>&1 || true
+      return 1
+    }
+  lifecycle_release_lock || {
+    lifecycle_guard_release >/dev/null 2>&1 || true
+    return 1
+  }
+  lifecycle_guard_release
 }
 
 lifecycle_quarantine() {  # <diagnostic>
+  lifecycle_guard_acquire || return 1
   lifecycle_write_state quarantined "$LIFECYCLE_SESSION_ID" \
     "$LIFECYCLE_PROCESS_GROUP_ID" false "$1"
+  local rc=$?
+  lifecycle_guard_release >/dev/null 2>&1 || true
+  return "$rc"
 }
 
 lifecycle_recover() {  # <cwd> <lifecycle-id>
   [[ $# -eq 2 ]] || return 2
   local cwd="$1" requested_id="$2"
   local state_id state_name owner_pid owner_started pgid recorded_worktree
+  local marker_file marker_value="" marker_present=0
   local recorded_branch recorded_commit recorded_files current_files tmp recovery_pid
   local start_branch start_commit integrity_violation=0 restored_files commit_files
   lifecycle_resolve_paths "$cwd" || return 1
   [[ "$requested_id" =~ ^[0-9]+-[0-9]+-[0-9]+$ ]] \
     || { LIFECYCLE_DIAGNOSTIC="invalid lifecycle id"; return 2; }
-  if ! mkdir "$LIFECYCLE_RECOVERY_LOCK" 2>/dev/null; then
-    LIFECYCLE_DIAGNOSTIC="recovery is already in progress"
-    return 1
-  fi
+  lifecycle_guard_acquire || return 1
 
   if [[ ! -r "$LIFECYCLE_STATE_FILE" ]]; then
     LIFECYCLE_DIAGNOSTIC="no recovery state exists"
-    rmdir "$LIFECYCLE_RECOVERY_LOCK"
+    lifecycle_guard_release >/dev/null 2>&1 || true
     return 1
   fi
 
@@ -240,8 +284,13 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
   owner_pid="$(jq -r '.owner_pid // 0' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
   owner_started="$(jq -r '.owner_started // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
   pgid="$(jq -r '.process_group_id // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
-  if [[ -z "$pgid" && -r "$LIFECYCLE_LOCK_DIR/process_group_id" ]]; then
-    pgid="$(<"$LIFECYCLE_LOCK_DIR/process_group_id")"
+  marker_file="$LIFECYCLE_LOCK_DIR/process_group_id"
+  if [[ -r "$marker_file" ]]; then
+    marker_present=1
+    marker_value="$(<"$marker_file")"
+    if [[ "$marker_value" =~ ^[1-9][0-9]*$ ]]; then
+      pgid="$marker_value"
+    fi
   fi
   recorded_worktree="$(jq -r '.worktree // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
   recorded_branch="$(jq -r '.branch // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
@@ -266,10 +315,17 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
   fi
 
   if [[ "$state_id" != "$requested_id" \
-        || ( "$state_name" != quarantined && "$state_name" != active ) \
+        || ( "$state_name" != quarantined && "$state_name" != active \
+             && "$state_name" != admitted ) \
         || "$recorded_worktree" != "$LIFECYCLE_WORKTREE" ]]; then
     LIFECYCLE_DIAGNOSTIC="quarantine state does not match this recovery"
-    rmdir "$LIFECYCLE_RECOVERY_LOCK"
+    lifecycle_guard_release >/dev/null 2>&1 || true
+    return 1
+  fi
+  if [[ "$state_name" == active \
+        && ( "$marker_present" -ne 1 || ! "$marker_value" =~ ^[1-9][0-9]*$ ) ]]; then
+    LIFECYCLE_DIAGNOSTIC="writer launch state is incomplete; recovery cannot prove which process group owns the worktree"
+    lifecycle_guard_release >/dev/null 2>&1 || true
     return 1
   fi
   if [[ "$integrity_violation" -eq 1 ]]; then
@@ -278,19 +334,19 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
           || ( "$current_files" != "$recorded_files" && "$current_files" != "$restored_files" \
                && "$current_files" != "[]" ) ]]; then
       LIFECYCLE_DIAGNOSTIC="restore the recorded starting branch and commit before recovery"
-      rmdir "$LIFECYCLE_RECOVERY_LOCK"
+      lifecycle_guard_release >/dev/null 2>&1 || true
       return 1
     fi
   elif [[ "$recorded_branch" != "$(git -C "$LIFECYCLE_WORKTREE" branch --show-current)" \
           || "$recorded_commit" != "$(git -C "$LIFECYCLE_WORKTREE" rev-parse HEAD)" \
           || "$recorded_files" != "$current_files" ]]; then
     LIFECYCLE_DIAGNOSTIC="quarantine state does not match this recovery"
-    rmdir "$LIFECYCLE_RECOVERY_LOCK"
+    lifecycle_guard_release >/dev/null 2>&1 || true
     return 1
   fi
   if lifecycle_pid_matches "$owner_pid" "$owner_started" || lifecycle_group_alive "$pgid"; then
     LIFECYCLE_DIAGNOSTIC="recorded writer is still alive"
-    rmdir "$LIFECYCLE_RECOVERY_LOCK"
+    lifecycle_guard_release >/dev/null 2>&1 || true
     return 1
   fi
 
@@ -312,7 +368,7 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
      .branch=$branch | .observed_commit=$commit | .files_changed=$files' \
     "$LIFECYCLE_STATE_FILE" > "$tmp" || {
       rm -f "$tmp"
-      rmdir "$LIFECYCLE_RECOVERY_LOCK"
+      lifecycle_guard_release >/dev/null 2>&1 || true
       return 1
     }
   mv "$tmp" "$LIFECYCLE_STATE_FILE"
@@ -321,10 +377,9 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
       "$LIFECYCLE_LOCK_DIR/process_group_id"
     rmdir "$LIFECYCLE_LOCK_DIR" || {
       LIFECYCLE_DIAGNOSTIC="stale live lock could not be removed"
-      rmdir "$LIFECYCLE_RECOVERY_LOCK"
+      lifecycle_guard_release >/dev/null 2>&1 || true
       return 1
     }
   fi
-  rmdir "$LIFECYCLE_RECOVERY_LOCK"
-  return 0
+  lifecycle_guard_release
 }

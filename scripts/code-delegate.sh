@@ -266,6 +266,24 @@ if [[ -n "$REQUESTED_LIFECYCLE_ID" ]]; then
   ATTEMPTS="${LIFECYCLE_ATTEMPTS:-0}"
 fi
 
+prepare_writer_phase() {
+  WRITER_STOPPED=false
+  LIFECYCLE_ATTEMPTS="$ATTEMPTS"
+  LIFECYCLE_SESSION_ID="$SESSION_ID"
+  LIFECYCLE_PROCESS_GROUP_ID=""
+  LIFECYCLE_WRITER_STOPPED=false
+  timeout_write_group_marker pending || return 1
+  lifecycle_update active "$SESSION_ID" "" false ""
+}
+
+record_writer_result() {
+  WRITER_STOPPED=$([[ "$RUN_GROUP_STOPPED" -eq 1 ]] && echo true || echo false)
+  LIFECYCLE_PROCESS_GROUP_ID="$RUN_GROUP_ID"
+  LIFECYCLE_SESSION_ID="$SESSION_ID"
+  LIFECYCLE_ATTEMPTS="$ATTEMPTS"
+  lifecycle_update active "$SESSION_ID" "$RUN_GROUP_ID" "$WRITER_STOPPED" "" >/dev/null 2>&1 || true
+}
+
 run_verify() {
   local verify_command f timed_out
   VERIFY_RC=0
@@ -274,12 +292,20 @@ run_verify() {
   VERIFY_RESULTS='[]'
   for verify_command in "${VERIFY_COMMANDS[@]}"; do
     f=$(mktemp)
+    if ! prepare_writer_phase; then
+      rm -f "$f"
+      VERIFY_OUT="could not record verification process ownership"
+      VERIFY_RC="$UNCONTAINED_EXIT"
+      VERIFY_FATAL=1
+      WRITER_STOPPED=false
+      return
+    fi
     run_with_timeout_in "${CSC_VERIFY_TIMEOUT:-1800}" "$CWD" \
       bash -c "$verify_command" >"$f" 2>&1
     VERIFY_RC=$?
     VERIFY_OUT="$(cat "$f")"
     rm -f "$f"
-    WRITER_STOPPED=$([[ "$RUN_GROUP_STOPPED" -eq 1 ]] && echo true || echo false)
+    record_writer_result
     timed_out=false
     [[ "$TIMEOUT_HIT" -eq 1 ]] && timed_out=true
     if [[ "$VERIFY_RC" -ne 0 && -z "$VERIFY_OUT" ]]; then
@@ -304,13 +330,29 @@ run_coder() {
   local prompt="$1" session="$2" rc
   HARNESS_TIMED_OUT=0
   RUN_GROUP_STOPPED=0
+  if ! prepare_writer_phase; then
+    echo "could not record coder process ownership" > "$ERR_FILE"
+    WRITER_STOPPED=false
+    return "$UNCONTAINED_EXIT"
+  fi
   harness_run "edit" "$ENTRY_MODEL" "$CWD" "$prompt" "$session"
   rc=$?
-  WRITER_STOPPED=$([[ "$RUN_GROUP_STOPPED" -eq 1 ]] && echo true || echo false)
-  LIFECYCLE_PROCESS_GROUP_ID="$RUN_GROUP_ID"
-  LIFECYCLE_SESSION_ID="$SESSION_ID"
-  LIFECYCLE_ATTEMPTS="$ATTEMPTS"
-  lifecycle_update active "$SESSION_ID" "$RUN_GROUP_ID" "$WRITER_STOPPED" "" >/dev/null 2>&1 || true
+  record_writer_result
+  return "$rc"
+}
+
+run_git_mutation() {
+  local rc
+  : > "$ERR_FILE"
+  if ! prepare_writer_phase; then
+    echo "could not record Git process ownership" > "$ERR_FILE"
+    WRITER_STOPPED=false
+    return "$UNCONTAINED_EXIT"
+  fi
+  run_with_timeout_in "${CSC_GIT_TIMEOUT:-1800}" "$CWD" \
+    git -C "$CWD" "$@" >"$ERR_FILE" 2>&1
+  rc=$?
+  record_writer_result
   return "$rc"
 }
 
@@ -357,22 +399,34 @@ fi
 
 current_branch="$(git -C "$CWD" branch --show-current 2>/dev/null)"
 current_commit="$(git -C "$CWD" rev-parse HEAD 2>/dev/null)"
-if [[ "$current_branch" != "$LIFECYCLE_START_BRANCH" || "$current_commit" != "$LIFECYCLE_START_COMMIT" ]]; then
+if [[ "$current_branch" != "$LIFECYCLE_EXPECTED_BRANCH" \
+      || "$current_commit" != "$LIFECYCLE_EXPECTED_COMMIT" ]]; then
   block_result "coder changed the branch or commit; inspect the preserved worktree before recovery" 1
 fi
 
 refresh_observed
-if [[ "$CHANGED" == true ]]; then
-  if ! git -C "$CWD" add -A 2>>"$ERR_FILE"; then
+if [[ -n "$(git -C "$CWD" status --porcelain 2>/dev/null)" ]]; then
+  if ! run_git_mutation add -A; then
+    if [[ "$WRITER_STOPPED" != true ]]; then
+      block_result "failed to contain staging process: $(cat "$ERR_FILE")" 1
+    fi
     block_result "failed to stage delegated changes: $(cat "$ERR_FILE")"
   fi
-  if ! git -C "$CWD" commit -m "$COMMIT_MESSAGE" >"$ERR_FILE" 2>&1; then
+  if ! run_git_mutation commit -m "$COMMIT_MESSAGE"; then
     observed_head="$(git -C "$CWD" rev-parse HEAD 2>/dev/null)"
     if [[ "$observed_head" != "$LIFECYCLE_START_COMMIT" ]]; then
       COMMIT_ID="$observed_head"
     fi
+    if [[ "$WRITER_STOPPED" != true ]]; then
+      block_result "failed to contain commit process: $(cat "$ERR_FILE")" 1
+    fi
     block_result "failed to commit delegated changes: $(cat "$ERR_FILE")"
   fi
+  COMMIT_ID="$(git -C "$CWD" rev-parse HEAD)"
+elif [[ "$CHANGED" == true ]]; then
+  # A prior attempt may have created the task commit before a post-commit hook
+  # failed or timed out. Keep that commit as the task result instead of trying
+  # to create an empty replacement commit on resume.
   COMMIT_ID="$(git -C "$CWD" rev-parse HEAD)"
 fi
 

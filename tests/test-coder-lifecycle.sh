@@ -160,6 +160,101 @@ check "recovery has no force option" "2" "$?"
 rm -rf "$LIFECYCLE_LOCK_DIR"
 rm -f "$LIFECYCLE_STATE_FILE"
 
+# An active writer phase is recoverable only when its atomic process marker is
+# complete, and the marker takes precedence over an older state snapshot.
+lifecycle_open "$WT" c-codex ""
+marker_id="$LIFECYCLE_ID"
+lifecycle_update active sess-marker 999999 false ""
+state_tmp="$LIFECYCLE_STATE_FILE.test"
+jq '.owner_pid=999999 | .owner_started=""' "$LIFECYCLE_STATE_FILE" > "$state_tmp"
+mv "$state_tmp" "$LIFECYCLE_STATE_FILE"
+printf 'pending\n' > "$LIFECYCLE_LOCK_DIR/process_group_id"
+( source "$LIB"; lifecycle_recover "$WT" "$marker_id" ) >/dev/null 2>&1
+check "recovery rejects an incomplete process marker" "1" "$?"
+
+rm -f "$LIFECYCLE_LOCK_DIR/process_group_id"
+( source "$LIB"; lifecycle_recover "$WT" "$marker_id" ) >/dev/null 2>&1
+check "recovery rejects a missing active process marker" "1" "$?"
+
+set -m
+( sleep 300 ) &
+marker_group=$!
+set +m
+printf '%s\n' "$marker_group" > "$LIFECYCLE_LOCK_DIR/process_group_id"
+( source "$LIB"; lifecycle_recover "$WT" "$marker_id" ) >/dev/null 2>&1
+check "newer live process marker overrides stale state" "1" "$?"
+kill -KILL -"$marker_group" 2>/dev/null
+wait "$marker_group" 2>/dev/null
+lifecycle_recover "$WT" "$marker_id" >/dev/null 2>&1
+check "stopped marked process can be recovered" "0" "$?"
+
+rm -rf "$LIFECYCLE_LOCK_DIR"
+rm -f "$LIFECYCLE_STATE_FILE"
+
+lifecycle_open "$WT" c-codex ""
+finish_guard_ready="$TMP/finish-guard-ready"
+(
+  source "$LIB"
+  lifecycle_resolve_paths "$WT"
+  lifecycle_guard_acquire
+  : > "$finish_guard_ready"
+  sleep 300
+) &
+finish_guard_owner=$!
+for _ in $(seq 1 50); do
+  [[ -e "$finish_guard_ready" ]] && break
+  sleep 0.1
+done
+lifecycle_finish >/dev/null 2>&1
+check "finish refuses to race an active recovery" "1" "$?"
+check "racing finish retains lifecycle state" "1" \
+  "$([[ -f "$LIFECYCLE_STATE_FILE" ]] && echo 1 || echo 0)"
+check "racing finish retains live ownership" "1" \
+  "$([[ -d "$LIFECYCLE_LOCK_DIR" ]] && echo 1 || echo 0)"
+kill -KILL "$finish_guard_owner" 2>/dev/null
+wait "$finish_guard_owner" 2>/dev/null
+lifecycle_finish
+
+guard_owner_file="$TMP/guard-owner"
+(
+  source "$LIB"
+  lifecycle_resolve_paths "$WT"
+  lifecycle_guard_acquire
+  printf '%s\n' "$BASHPID" > "$guard_owner_file"
+  sleep 300
+) &
+guard_owner=$!
+for _ in $(seq 1 50); do
+  [[ -s "$guard_owner_file" ]] && break
+  sleep 0.1
+done
+kill -KILL "$guard_owner" 2>/dev/null
+wait "$guard_owner" 2>/dev/null
+lifecycle_resolve_paths "$WT"
+lifecycle_guard_acquire
+check "stale recovery guard can be reclaimed" "0" "$?"
+lifecycle_guard_release
+check "reclaimed recovery guard can be released" "0" "$?"
+
+guard_race_start="$TMP/guard-race-start"
+guard_race_events="$TMP/guard-race-events"
+for contender in 1 2; do
+  (
+    source "$LIB"
+    lifecycle_resolve_paths "$WT"
+    while [[ ! -e "$guard_race_start" ]]; do sleep 0.01; done
+    if lifecycle_guard_acquire; then
+      printf 'entered\n' >> "$guard_race_events"
+      sleep 1
+      lifecycle_guard_release
+    fi
+  ) &
+done
+: > "$guard_race_start"
+wait
+check "competing stale-guard reclaimers remain exclusive" "1" \
+  "$(wc -l < "$guard_race_events" | tr -d ' ')"
+
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

@@ -334,7 +334,7 @@ signal_owner=$!
 signal_git=$(git -C "$WT_SIGNAL" rev-parse --absolute-git-dir)
 for _ in $(seq 1 50); do
   signal_pgid=$(cat "$signal_git/claude-subagents-coder.lock/process_group_id" 2>/dev/null)
-  [[ -n "$signal_pgid" ]] && break
+  [[ "$signal_pgid" =~ ^[1-9][0-9]*$ ]] && break
   sleep 0.1
 done
 kill -TERM "$signal_owner" 2>/dev/null
@@ -357,7 +357,7 @@ crash_owner=$!
 crash_git=$(git -C "$WT_CRASH" rev-parse --absolute-git-dir)
 for _ in $(seq 1 50); do
   crash_pgid=$(cat "$crash_git/claude-subagents-coder.lock/process_group_id" 2>/dev/null)
-  [[ -n "$crash_pgid" ]] && break
+  [[ "$crash_pgid" =~ ^[1-9][0-9]*$ ]] && break
   sleep 0.1
 done
 crash_lifecycle=$(jq -r '.lifecycle_id' "$crash_git/claude-subagents-coder-state.json")
@@ -374,6 +374,40 @@ done
 out=$(bash "$SCRIPT" recover --cwd "$WT_CRASH" --lifecycle-id "$crash_lifecycle" 2>/dev/null)
 check "stale active lifecycle can be recovered" "RECOVERED" "$(echo "$out" | jq -r '.status')"
 clear_lifecycle_at "$WT_CRASH"
+
+# --- recovery observes the verification process, not the earlier coder process ---
+WT_VERIFY_CRASH="$TMP/verify-crash-work"
+git -C "$MAIN" worktree add -q -b feature/verify-crash "$WT_VERIFY_CRASH" main
+verify_pid_file="$TMP/verify-crash.pid"
+verify_out="$TMP/verify-crash.json"
+verify_command="printf '%s\\n' \$\$ > '$verify_pid_file'; sleep 30"
+bash "$SCRIPT" --task-file "$task" --cwd "$WT_VERIFY_CRASH" \
+  --commit-message "test: verification crash" --coder c-codex \
+  --verify-cmd "$verify_command" >"$verify_out" 2>/dev/null &
+verify_owner=$!
+verify_git=$(git -C "$WT_VERIFY_CRASH" rev-parse --absolute-git-dir)
+for _ in $(seq 1 100); do
+  verify_pgid=$(cat "$verify_git/claude-subagents-coder.lock/process_group_id" 2>/dev/null)
+  [[ -s "$verify_pid_file" && "$verify_pgid" =~ ^[1-9][0-9]*$ ]] && break
+  sleep 0.1
+done
+verify_lifecycle=$(jq -r '.lifecycle_id' "$verify_git/claude-subagents-coder-state.json")
+kill -KILL "$verify_owner" 2>/dev/null
+wait "$verify_owner" 2>/dev/null
+out=$(bash "$SCRIPT" recover --cwd "$WT_VERIFY_CRASH" \
+  --lifecycle-id "$verify_lifecycle" 2>/dev/null)
+check "crashed verification keeps worktree quarantined while verifier lives" "BLOCKED" \
+  "$(echo "$out" | jq -r '.status')"
+kill -KILL -"$verify_pgid" 2>/dev/null
+for _ in $(seq 1 100); do
+  kill -0 -"$verify_pgid" 2>/dev/null || break
+  sleep 0.1
+done
+out=$(bash "$SCRIPT" recover --cwd "$WT_VERIFY_CRASH" \
+  --lifecycle-id "$verify_lifecycle" 2>/dev/null)
+check "stopped crashed verification can be recovered" "RECOVERED" \
+  "$(echo "$out" | jq -r '.status')"
+clear_lifecycle_at "$WT_VERIFY_CRASH"
 
 # --- a lingering child is killed and the task is blocked ---
 linger_pid_file="$TMP/linger.pid"
@@ -451,6 +485,74 @@ check "failed commit does not rewrite history" "$before_failed_commit" "$(git -C
 git -C "$WT" config --unset core.hooksPath
 clear_lifecycle
 
+# --- a crash during a commit hook keeps the hook under lifecycle ownership ---
+WT_HOOK_CRASH="$TMP/hook-crash-work"
+git -C "$MAIN" worktree add -q -b feature/hook-crash "$WT_HOOK_CRASH" main
+hook_crash_dir="$TMP/hook-crash-hooks"
+hook_pid_file="$TMP/hook-crash.pid"
+hook_crash_out="$TMP/hook-crash.json"
+mkdir -p "$hook_crash_dir"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$$" > "$HOOK_PID_FILE"\nsleep 30\n' \
+  > "$hook_crash_dir/pre-commit"
+chmod +x "$hook_crash_dir/pre-commit"
+git -C "$WT_HOOK_CRASH" config core.hooksPath "$hook_crash_dir"
+MOCK_EDIT_FILE="$WT_HOOK_CRASH/hook-crash.txt" HOOK_PID_FILE="$hook_pid_file" \
+  bash "$SCRIPT" --task-file "$task" --cwd "$WT_HOOK_CRASH" \
+    --commit-message "test: hook crash" --coder c-codex --verify-cmd true \
+    >"$hook_crash_out" 2>/dev/null &
+hook_owner=$!
+hook_crash_git=$(git -C "$WT_HOOK_CRASH" rev-parse --absolute-git-dir)
+for _ in $(seq 1 100); do
+  hook_pgid=$(cat "$hook_crash_git/claude-subagents-coder.lock/process_group_id" 2>/dev/null)
+  [[ -s "$hook_pid_file" && "$hook_pgid" =~ ^[1-9][0-9]*$ ]] && break
+  sleep 0.1
+done
+hook_crash_lifecycle=$(jq -r '.lifecycle_id' \
+  "$hook_crash_git/claude-subagents-coder-state.json")
+kill -KILL "$hook_owner" 2>/dev/null
+wait "$hook_owner" 2>/dev/null
+out=$(bash "$SCRIPT" recover --cwd "$WT_HOOK_CRASH" \
+  --lifecycle-id "$hook_crash_lifecycle" 2>/dev/null)
+check "crashed commit hook keeps worktree quarantined while hook lives" "BLOCKED" \
+  "$(echo "$out" | jq -r '.status')"
+kill -KILL -"$hook_pgid" 2>/dev/null
+for _ in $(seq 1 100); do
+  kill -0 -"$hook_pgid" 2>/dev/null || break
+  sleep 0.1
+done
+out=$(bash "$SCRIPT" recover --cwd "$WT_HOOK_CRASH" \
+  --lifecycle-id "$hook_crash_lifecycle" 2>/dev/null)
+check "stopped crashed commit hook can be recovered" "RECOVERED" \
+  "$(echo "$out" | jq -r '.status')"
+clear_lifecycle_at "$WT_HOOK_CRASH"
+
+# --- a timed-out post-commit hook keeps the commit as the eventual result ---
+WT_POST_TIMEOUT="$TMP/post-timeout-work"
+git -C "$MAIN" worktree add -q -b feature/post-timeout "$WT_POST_TIMEOUT" main
+post_timeout_hooks="$TMP/post-timeout-hooks"
+mkdir -p "$post_timeout_hooks"
+printf '#!/usr/bin/env bash\nsleep 30\n' > "$post_timeout_hooks/post-commit"
+chmod +x "$post_timeout_hooks/post-commit"
+git -C "$WT_POST_TIMEOUT" config core.hooksPath "$post_timeout_hooks"
+out=$(CSC_GIT_TIMEOUT=1 MOCK_EDIT_FILE="$WT_POST_TIMEOUT/post-timeout.txt" \
+  bash "$SCRIPT" --task-file "$task" --cwd "$WT_POST_TIMEOUT" \
+    --commit-message "test: post timeout" --coder c-codex --verify-cmd true 2>/dev/null)
+post_timeout_lifecycle=$(echo "$out" | jq -r '.lifecycle_id')
+post_timeout_session=$(echo "$out" | jq -r '.session_id')
+post_timeout_commit=$(git -C "$WT_POST_TIMEOUT" rev-parse HEAD)
+check "timed-out post-commit hook is BLOCKED" "BLOCKED" \
+  "$(echo "$out" | jq -r '.status')"
+git -C "$WT_POST_TIMEOUT" config --unset core.hooksPath
+out=$(bash "$SCRIPT" --task-file "$task" --cwd "$WT_POST_TIMEOUT" \
+  --commit-message "test: post timeout resume" --coder c-codex --verify-cmd true \
+  --session "$post_timeout_session" --lifecycle-id "$post_timeout_lifecycle" 2>/dev/null)
+check "post-commit timeout resume is DONE" "DONE" "$(echo "$out" | jq -r '.status')"
+check "post-commit timeout resume reports the existing task commit" \
+  "$post_timeout_commit" "$(echo "$out" | jq -r '.commit_id')"
+check "post-commit timeout resume reports the task file" "post-timeout.txt" \
+  "$(echo "$out" | jq -r '.files_changed[0]')"
+clear_lifecycle_at "$WT_POST_TIMEOUT"
+
 rm -f "$hooks/pre-commit"
 printf '#!/usr/bin/env bash\nprintf "hook change\\n" > hook-leftover.txt\n' > "$hooks/post-commit"
 chmod +x "$hooks/post-commit"
@@ -466,8 +568,14 @@ git -C "$WT" config --unset core.hooksPath
 out=$(run --coder c-codex --verify-cmd true --session "$hook_session" \
       --lifecycle-id "$hook_lifecycle" 2>/dev/null)
 check "hook-leftover lifecycle can resume" "DONE" "$(echo "$out" | jq -r '.status')"
-check "resumed hook leftover is committed" "hook-leftover.txt" \
-  "$(echo "$out" | jq -r '.files_changed[0]')"
+check "resumed hook lifecycle still reports changes" "true" \
+  "$(echo "$out" | jq -r '.changed')"
+check "resumed hook lifecycle reports its final commit" "1" \
+  "$([[ -n "$(echo "$out" | jq -r '.commit_id')" ]] && echo 1 || echo 0)"
+check "resumed hook lifecycle includes the original task file" "1" \
+  "$(echo "$out" | jq 'any(.files_changed[]; . == "commit-with-hook.txt") | if . then 1 else 0 end')"
+check "resumed hook lifecycle includes the hook leftover" "1" \
+  "$(echo "$out" | jq 'any(.files_changed[]; . == "hook-leftover.txt") | if . then 1 else 0 end')"
 
 # --- completion never reports DONE if ownership release fails ---
 WT_FINALIZE="$TMP/finalize-work"

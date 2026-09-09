@@ -44,6 +44,14 @@ timeout_stop_group() {  # <process-group-id>
   ! timeout_group_has_live_members "$pgid"
 }
 
+timeout_write_group_marker() {  # <value>
+  local value="$1" tmp
+  [[ -n "${RUN_GROUP_RECORD_FILE:-}" ]] || return 0
+  tmp="${RUN_GROUP_RECORD_FILE}.tmp.$BASHPID.$RANDOM"
+  printf '%s\n' "$value" > "$tmp" || return 1
+  mv "$tmp" "$RUN_GROUP_RECORD_FILE"
+}
+
 # run_with_timeout <seconds> <command...>
 # Returns the command's exit status, or 124 if it had to be killed.
 # Also sets TIMEOUT_HIT, for callers that are not behind a subshell.
@@ -59,7 +67,7 @@ run_with_timeout() {
 run_with_timeout_in() {
   local secs="$1" dir="$2"
   shift 2
-  local flag pid watcher rc
+  local flag pid watcher="" rc gate=""
   local old_int old_term monitor_was_on=0
   [[ -d "$dir" ]] || return 2
   flag="$(mktemp)"
@@ -77,14 +85,27 @@ run_with_timeout_in() {
   # in `kill` reaches the command and everything it spawned. Without this, a
   # timed-out CLI would keep running and could still be editing files.
   [[ $- == *m* ]] && monitor_was_on=1
+  gate=$(mktemp) || { rm -f "$flag"; return "$UNCONTAINED_EXIT"; }
+  rm -f "$gate"
+  if [[ -n "${RUN_GROUP_RECORD_FILE:-}" ]]; then
+    timeout_write_group_marker pending || { rm -f "$flag"; return "$UNCONTAINED_EXIT"; }
+  fi
+
   set -m
-  ( cd "$dir" && exec "$@" ) &
+  ( while [[ ! -e "$gate" ]]; do sleep 0.01; done; cd "$dir" && exec "$@" ) &
   pid=$!
   RUN_GROUP_ID="$pid"
+  # From this point onward, an interrupt kills the gated group even if marker
+  # setup or watcher setup has not finished yet.
+  trap 'kill -KILL -'"$pid"' 2>/dev/null' INT TERM
   if [[ -n "${RUN_GROUP_RECORD_FILE:-}" ]]; then
-    printf '%s\n' "$RUN_GROUP_ID" > "$RUN_GROUP_RECORD_FILE"
+    if ! timeout_write_group_marker "$RUN_GROUP_ID"; then
+      timeout_stop_group "$RUN_GROUP_ID" >/dev/null 2>&1 || true
+      [[ "$monitor_was_on" -eq 1 ]] || set +m
+      rm -f "$flag" "$gate"
+      return "$UNCONTAINED_EXIT"
+    fi
   fi
-  [[ "$monitor_was_on" -eq 1 ]] || set +m
 
   {
     sleep "$secs"
@@ -107,6 +128,8 @@ run_with_timeout_in() {
   # While the child runs, an interrupt should take the whole group down rather
   # than orphaning it.
   trap 'kill -KILL -'"$pid"' 2>/dev/null; kill '"$watcher"' 2>/dev/null' INT TERM
+  : > "$gate"
+  [[ "$monitor_was_on" -eq 1 ]] || set +m
 
   wait "$pid"; rc=$?
 
@@ -129,11 +152,13 @@ run_with_timeout_in() {
      || timeout_group_has_live_members "$RUN_GROUP_ID"; then
     RUN_GROUP_STOPPED=0
     rm -f "$flag"
+    [[ -z "$gate" ]] || rm -f "$gate"
     return "$UNCONTAINED_EXIT"
   fi
 
   RUN_GROUP_STOPPED=1
   rm -f "$flag"
+  [[ -z "$gate" ]] || rm -f "$gate"
   [[ "$TIMEOUT_HIT" -eq 1 ]] && return "$TIMEOUT_EXIT"
   [[ "$RUN_GROUP_LINGERED" -eq 1 ]] && return "$LINGERING_EXIT"
   return "$rc"
