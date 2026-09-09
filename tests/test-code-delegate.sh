@@ -343,6 +343,14 @@ check "coder-created commit is preserved" "1" \
   "$([[ "$(git -C "$WT_TAMPER" rev-parse HEAD)" != "$tamper_start" ]] && echo 1 || echo 0)"
 check "coder-created commit quarantines worktree" "1" \
   "$([[ -d "$tamper_git/claude-subagents-coder.lock" ]] && echo 1 || echo 0)"
+tamper_lifecycle=$(echo "$out" | jq -r '.lifecycle_id')
+bash "$SCRIPT" recover --cwd "$WT_TAMPER" --lifecycle-id "$tamper_lifecycle" >/dev/null 2>&1
+check "coder-created commit cannot be recovered in place" "1" "$?"
+git -C "$WT_TAMPER" reset --mixed -q "$tamper_start"
+out=$(bash "$SCRIPT" recover --cwd "$WT_TAMPER" --lifecycle-id "$tamper_lifecycle" 2>/dev/null)
+check "restored coder commit can be recovered" "RECOVERED" "$(echo "$out" | jq -r '.status')"
+check "recovery retains coder commit changes" "delegated change" "$(cat "$WT_TAMPER/coder-commit.txt")"
+clear_lifecycle_at "$WT_TAMPER"
 
 WT_SWITCH="$TMP/switch-work"
 git -C "$MAIN" worktree add -q -b feature/switch "$WT_SWITCH" main
@@ -352,6 +360,13 @@ out=$(MOCK_GIT_COMMAND="git switch -q -c feature/coder-switched" \
 check "coder branch switch is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
 check "coder branch switch is preserved" "feature/coder-switched" \
   "$(git -C "$WT_SWITCH" branch --show-current)"
+switch_lifecycle=$(echo "$out" | jq -r '.lifecycle_id')
+bash "$SCRIPT" recover --cwd "$WT_SWITCH" --lifecycle-id "$switch_lifecycle" >/dev/null 2>&1
+check "coder branch switch cannot be recovered in place" "1" "$?"
+git -C "$WT_SWITCH" switch -q feature/switch
+out=$(bash "$SCRIPT" recover --cwd "$WT_SWITCH" --lifecycle-id "$switch_lifecycle" 2>/dev/null)
+check "restored coder branch can be recovered" "RECOVERED" "$(echo "$out" | jq -r '.status')"
+clear_lifecycle_at "$WT_SWITCH"
 
 # --- failed and dirty commits preserve work for inspection ---
 hooks="$TMP/hooks"

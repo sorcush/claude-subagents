@@ -212,6 +212,7 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
   local cwd="$1" requested_id="$2"
   local state_id state_name owner_pid owner_started pgid recorded_worktree
   local recorded_branch recorded_commit recorded_files current_files tmp recovery_pid
+  local start_branch start_commit integrity_violation=0 restored_files
   lifecycle_resolve_paths "$cwd" || return 1
   [[ "$requested_id" =~ ^[0-9]+-[0-9]+-[0-9]+$ ]] \
     || { LIFECYCLE_DIAGNOSTIC="invalid lifecycle id"; return 2; }
@@ -234,14 +235,42 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
   recorded_worktree="$(jq -r '.worktree // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
   recorded_branch="$(jq -r '.branch // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
   recorded_commit="$(jq -r '.observed_commit // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
+  start_branch="$(jq -r '.start_branch // .branch // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
+  start_commit="$(jq -r '.start_commit // .observed_commit // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
   recorded_files="$(jq -cS '.files_changed // []' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
   current_files="$(lifecycle_changed_paths | jq -cS .)"
 
+  if [[ "$recorded_branch" != "$start_branch" || "$recorded_commit" != "$start_commit" ]]; then
+    integrity_violation=1
+  fi
+  restored_files="$recorded_files"
+  if [[ "$integrity_violation" -eq 1 ]] \
+     && git -C "$LIFECYCLE_WORKTREE" cat-file -e "$start_commit^{commit}" 2>/dev/null \
+     && git -C "$LIFECYCLE_WORKTREE" cat-file -e "$recorded_commit^{commit}" 2>/dev/null; then
+    restored_files="$({
+      printf '%s' "$recorded_files" | jq -r '.[]' | while IFS= read -r path; do printf '%s\0' "$path"; done
+      git -C "$LIFECYCLE_WORKTREE" diff --name-only -z "$start_commit..$recorded_commit" 2>/dev/null
+    } | jq -Rs 'split("\u0000") | map(select(length > 0)) | unique' | jq -cS .)"
+  fi
+
   if [[ "$state_id" != "$requested_id" || "$state_name" != quarantined \
-        || "$recorded_worktree" != "$LIFECYCLE_WORKTREE" \
-        || "$recorded_branch" != "$(git -C "$LIFECYCLE_WORKTREE" branch --show-current)" \
-        || "$recorded_commit" != "$(git -C "$LIFECYCLE_WORKTREE" rev-parse HEAD)" \
-        || "$recorded_files" != "$current_files" ]]; then
+        || "$recorded_worktree" != "$LIFECYCLE_WORKTREE" ]]; then
+    LIFECYCLE_DIAGNOSTIC="quarantine state does not match this recovery"
+    rmdir "$LIFECYCLE_RECOVERY_LOCK"
+    return 1
+  fi
+  if [[ "$integrity_violation" -eq 1 ]]; then
+    if [[ "$start_branch" != "$(git -C "$LIFECYCLE_WORKTREE" branch --show-current)" \
+          || "$start_commit" != "$(git -C "$LIFECYCLE_WORKTREE" rev-parse HEAD)" \
+          || ( "$current_files" != "$recorded_files" && "$current_files" != "$restored_files" \
+               && "$current_files" != "[]" ) ]]; then
+      LIFECYCLE_DIAGNOSTIC="restore the recorded starting branch and commit before recovery"
+      rmdir "$LIFECYCLE_RECOVERY_LOCK"
+      return 1
+    fi
+  elif [[ "$recorded_branch" != "$(git -C "$LIFECYCLE_WORKTREE" branch --show-current)" \
+          || "$recorded_commit" != "$(git -C "$LIFECYCLE_WORKTREE" rev-parse HEAD)" \
+          || "$recorded_files" != "$current_files" ]]; then
     LIFECYCLE_DIAGNOSTIC="quarantine state does not match this recovery"
     rmdir "$LIFECYCLE_RECOVERY_LOCK"
     return 1
@@ -263,7 +292,11 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
   LIFECYCLE_START_COMMIT="$(jq -r '.start_commit // .observed_commit // ""' "$LIFECYCLE_STATE_FILE")"
   LIFECYCLE_ATTEMPTS="$(jq -r '.attempts // 0' "$LIFECYCLE_STATE_FILE")"
   tmp="$LIFECYCLE_STATE_FILE.tmp.$BASHPID.$RANDOM"
-  jq '.state="recoverable" | .writer_stopped=true | .process_group_id=""' \
+  jq --arg branch "$(git -C "$LIFECYCLE_WORKTREE" branch --show-current)" \
+    --arg commit "$(git -C "$LIFECYCLE_WORKTREE" rev-parse HEAD)" \
+    --argjson files "$current_files" \
+    '.state="recoverable" | .writer_stopped=true | .process_group_id="" |
+     .branch=$branch | .observed_commit=$commit | .files_changed=$files' \
     "$LIFECYCLE_STATE_FILE" > "$tmp" || {
       rm -f "$tmp"
       rmdir "$LIFECYCLE_RECOVERY_LOCK"
