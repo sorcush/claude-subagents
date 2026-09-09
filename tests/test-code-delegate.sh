@@ -57,6 +57,22 @@ out=$(run --coder c-codex --verify-cmd "" 2>/dev/null)
 check "empty verify cmd is DONE"      "DONE"  "$(echo "$out" | jq -r '.status')"
 check "empty verify cmd unverified"   "false" "$(echo "$out" | jq -r '.verified')"
 
+# --- multiple verification commands run in order and rerun as one pass ---
+verify_log="$TMP/verify-order"
+first="echo first >> '$verify_log'"
+second="echo second >> '$verify_log'"
+out=$(run --coder c-codex --verify-cmd "$first" --verify-cmd "$second" 2>/dev/null)
+check "verification commands preserve order" $'first\nsecond' "$(cat "$verify_log")"
+check "verification result has two entries" "2" "$(echo "$out" | jq '.verification|length')"
+
+rm -f "$verify_log"
+verify_count="$TMP/verify-count"
+echo 0 > "$verify_count"
+second_retry="echo second >> '$verify_log'; n=\$(cat '$verify_count'); n=\$((n+1)); echo \$n > '$verify_count'; [ \$n -ge 2 ]"
+out=$(run --coder c-codex --verify-cmd "$first" --verify-cmd "$second_retry" --max-retries 1 2>/dev/null)
+check "retry reruns the complete verification list" $'first\nsecond\nfirst\nsecond' "$(cat "$verify_log")"
+check "retry result keeps the successful full pass" "2" "$(echo "$out" | jq '.verification|length')"
+
 # --- the verify command runs in --cwd, NOT in the caller's directory ---
 # This is the single most likely porting bug: the old cc-delegate.sh ran
 # `eval "$VERIFY_CMD"` wherever it happened to be invoked from.
@@ -121,6 +137,24 @@ check "--cwd outside a git repo exits 2" "2" "$?"
 run --coder nosuch --verify-cmd "true" >/dev/null 2>&1
 check "unknown coder exits 2" "2" "$?"
 
+validation_log="$TMP/validation-coder.log"
+MOCK_LOG="$validation_log" run --coder c-codex --verify-cmd "" --verify-cmd "true" >/dev/null 2>&1
+check "empty verification cannot be mixed with commands" "2" "$?"
+check "mixed empty verification is rejected before coder invocation" "0" \
+  "$([[ ! -s "$validation_log" ]] && echo 0 || echo 1)"
+
+rm -f "$validation_log"
+MOCK_LOG="$validation_log" run --coder c-codex --verify-cmd "server: npm test" >/dev/null 2>&1
+check "human label is rejected before coder invocation" "2" "$?"
+check "human label does not invoke the coder" "0" \
+  "$([[ ! -s "$validation_log" ]] && echo 0 || echo 1)"
+
+rm -f "$validation_log"
+MOCK_LOG="$validation_log" run --coder c-codex --verify-cmd "if then" >/dev/null 2>&1
+check "invalid shell syntax is rejected" "2" "$?"
+check "invalid shell syntax does not invoke the coder" "0" \
+  "$([[ ! -s "$validation_log" ]] && echo 0 || echo 1)"
+
 for bad in "-1" "" "abc" "3+3"; do
   run --coder c-codex --verify-cmd "true" --max-retries "$bad" >/dev/null 2>&1
   check "--max-retries '$bad' exits 2" "2" "$?"
@@ -148,6 +182,16 @@ for k in c-cursor c-codex c-claude; do
   check "$k timeout reports the real session id" "sess-timeout-$k" \
     "$(echo "$out" | jq -r '.session_id')"
 done
+
+# --- verification timeout blocks without another coder pass ---
+verify_timeout_log="$TMP/verify-timeout-coder.log"
+out=$(CSC_VERIFY_TIMEOUT=1 MOCK_LOG="$verify_timeout_log" MOCK_SESSION="sess-verify-timeout" \
+      run --coder c-codex --verify-cmd "sleep 5" --max-retries 3 2>/dev/null)
+check "verification timeout is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
+check "verification timeout is structured" "true" "$(echo "$out" | jq -r '.verification[-1].timed_out')"
+check "verification timeout preserves session" "sess-verify-timeout" "$(echo "$out" | jq -r '.session_id')"
+check "verification timeout does not retry coder" "1" \
+  "$(grep -o 'ARGS:' "$verify_timeout_log" | wc -l | tr -d ' ')"
 
 rm -rf "$WT"
 echo "---"

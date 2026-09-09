@@ -13,17 +13,27 @@ source "$SCRIPT_DIR/lib/timeout.sh"
 source "$SCRIPT_DIR/lib/harness.sh"
 
 usage() {
-  echo "usage: code-delegate.sh --coder <key> --task-file <path> --verify-cmd <cmd> --cwd <dir>" >&2
+  echo "usage: code-delegate.sh --coder <key> --task-file <path> --verify-cmd <cmd> [--verify-cmd <cmd> ...] --cwd <dir>" >&2
   echo "       [--max-retries N] [--session <id>]" >&2
 }
 
-CODER=""; TASK_FILE=""; VERIFY_CMD=""; VERIFY_SET=0; CWD=""; MAX_RETRIES=3; SESSION=""
+input_error() {
+  echo "error: $1" >&2
+  usage
+  exit 2
+}
+
+CODER=""; TASK_FILE=""; VERIFY_COMMANDS=(); CWD=""; MAX_RETRIES=3; SESSION=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --coder)       CODER="${2:-}";       shift 2 ;;
     --task-file)   TASK_FILE="${2:-}";   shift 2 ;;
-    --verify-cmd)  VERIFY_CMD="${2:-}"; VERIFY_SET=1; shift 2 ;;
+    --verify-cmd)
+      [[ $# -ge 2 ]] || input_error "--verify-cmd requires a value"
+      VERIFY_COMMANDS+=("$2")
+      shift 2
+      ;;
     --cwd)         CWD="${2:-}";         shift 2 ;;
     --max-retries)
       [[ $# -ge 2 ]] || { echo "error: --max-retries requires a value" >&2; usage; exit 2; }
@@ -38,7 +48,7 @@ done
 [[ -n "$CODER" ]] || { echo "error: --coder is required" >&2; usage; exit 2; }
 [[ -n "$TASK_FILE" && -r "$TASK_FILE" ]] \
   || { echo "error: --task-file missing or unreadable" >&2; usage; exit 2; }
-[[ "$VERIFY_SET" -eq 1 ]] \
+[[ "${#VERIFY_COMMANDS[@]}" -gt 0 ]] \
   || { echo "error: --verify-cmd is required (use \"\" for no verification)" >&2; usage; exit 2; }
 [[ -n "$CWD" && -d "$CWD" ]] \
   || { echo "error: --cwd missing or not a directory" >&2; usage; exit 2; }
@@ -46,6 +56,21 @@ done
 # either loops forever or blows up with a syntax error.
 [[ "$MAX_RETRIES" =~ ^[0-9]+$ ]] \
   || { echo "error: --max-retries must be a non-negative integer, got '$MAX_RETRIES'" >&2; exit 2; }
+
+VERIFICATION_MODE="commands"
+if [[ "${#VERIFY_COMMANDS[@]}" -eq 1 && -z "${VERIFY_COMMANDS[0]}" ]]; then
+  VERIFICATION_MODE="none"
+else
+  for verify_command in "${VERIFY_COMMANDS[@]}"; do
+    [[ -n "$verify_command" ]] \
+      || input_error "empty verification cannot be mixed with verification commands"
+    bash -n -c "$verify_command" >/dev/null 2>&1 \
+      || input_error "invalid shell syntax in --verify-cmd"
+    if [[ "$verify_command" =~ ^[[:space:]]*[[:alnum:]_.-]+:[[:space:]] ]]; then
+      input_error "verification commands cannot start with a label; remove text such as server: or client: and pass each command with its own --verify-cmd"
+    fi
+  done
+fi
 
 # Resolve to an absolute path and require a real git worktree. Everything below
 # runs here: the task, every retry, the verify command, and every git call.
@@ -61,13 +86,16 @@ ERR_FILE=$(mktemp)
 trap 'rm -f "$ERR_FILE"' EXIT
 SESSION_ID=""
 RESULT=""
+VERIFY_RESULTS='[]'
 
 emit() {  # emit <status> <session> <attempts> <verified> <changed> <result> <verify_output>
   jq -nc --arg status "$1" --arg coder "$CODER" --arg session "$2" \
          --argjson attempts "$3" --argjson verified "$4" --argjson changed "$5" \
-         --arg result "$6" --arg vout "$7" \
+         --arg result "$6" --arg vout "$7" --arg mode "$VERIFICATION_MODE" \
+         --argjson verification "$VERIFY_RESULTS" \
     '{status:$status, coder:$coder, session_id:$session, attempts:$attempts,
       verified:$verified, changed:$changed, commit_id:"",
+      verification_mode:$mode, verification:$verification,
       result:$result, verify_output:$vout}'
 }
 
@@ -86,20 +114,41 @@ changed_flag() {
 # could have.
 VERIFY_RC=0
 VERIFY_OUT=""
+VERIFY_FATAL=0
 run_verify() {
-  local f; f=$(mktemp)
-  ( cd "$CWD" && eval "$VERIFY_CMD" ) >"$f" 2>&1
-  VERIFY_RC=$?
-  VERIFY_OUT="$(cat "$f")"
-  rm -f "$f"
-  # A verify command can fail while printing nothing at all (`false` is the common
-  # case), which would leave the user with an empty explanation. Substitute the exit
-  # status so the report always says something. This is a FALLBACK for genuinely empty
-  # output — the test below proves real output is still propagated verbatim, so this
-  # cannot hide a broken capture.
-  if [[ $VERIFY_RC -ne 0 && -z "$VERIFY_OUT" ]]; then
-    VERIFY_OUT="verification command exited with status $VERIFY_RC"
-  fi
+  local verify_command f timed_out
+  VERIFY_RC=0
+  VERIFY_OUT=""
+  VERIFY_FATAL=0
+  VERIFY_RESULTS='[]'
+  for verify_command in "${VERIFY_COMMANDS[@]}"; do
+    f=$(mktemp)
+    run_with_timeout_in "${CSC_VERIFY_TIMEOUT:-1800}" "$CWD" \
+      bash -c "$verify_command" >"$f" 2>&1
+    VERIFY_RC=$?
+    VERIFY_OUT="$(cat "$f")"
+    rm -f "$f"
+    timed_out=false
+    [[ "$TIMEOUT_HIT" -eq 1 ]] && timed_out=true
+    if [[ $VERIFY_RC -ne 0 && -z "$VERIFY_OUT" ]]; then
+      VERIFY_OUT="verification command exited with status $VERIFY_RC"
+    fi
+    if [[ "$timed_out" == true ]]; then
+      VERIFY_OUT="verification timed out after ${CSC_VERIFY_TIMEOUT:-1800}s${VERIFY_OUT:+: $VERIFY_OUT}"
+    fi
+    VERIFY_RESULTS="$(jq -cn \
+      --argjson previous "$VERIFY_RESULTS" \
+      --arg command "$verify_command" \
+      --argjson exit_code "$VERIFY_RC" \
+      --argjson timed_out "$timed_out" \
+      --arg output "$VERIFY_OUT" \
+      '$previous + [{command:$command,exit_code:$exit_code,timed_out:$timed_out,output:$output}]')"
+    if [[ "$TIMEOUT_HIT" -eq 1 || "$VERIFY_RC" -eq "$LINGERING_EXIT" \
+          || "$VERIFY_RC" -eq "$UNCONTAINED_EXIT" ]]; then
+      VERIFY_FATAL=1
+    fi
+    [[ "$VERIFY_RC" -eq 0 ]] || break
+  done
 }
 
 PROMPT="Read the file $TASK_FILE and implement the task it describes. Make all necessary code edits."
@@ -116,7 +165,7 @@ if [[ -z "$SESSION_ID" ]]; then
   exit 1
 fi
 
-if [[ -z "$VERIFY_CMD" ]]; then
+if [[ "$VERIFICATION_MODE" == "none" ]]; then
   emit DONE "$SESSION_ID" 0 false "$(changed_flag)" "$RESULT" ""
   exit 0
 fi
@@ -126,6 +175,10 @@ run_verify
 if [[ "$VERIFY_RC" -eq 0 ]]; then
   emit DONE "$SESSION_ID" "$attempts" true "$(changed_flag)" "$RESULT" "$VERIFY_OUT"
   exit 0
+fi
+if [[ "$VERIFY_FATAL" -eq 1 ]]; then
+  emit BLOCKED "$SESSION_ID" "$attempts" false "$(changed_flag)" "$RESULT" "$VERIFY_OUT"
+  exit 1
 fi
 
 while [[ $attempts -lt $MAX_RETRIES ]]; do
@@ -153,6 +206,10 @@ Fix the code so the verification passes. Make all necessary edits."
   if [[ "$VERIFY_RC" -eq 0 ]]; then
     emit DONE "$SESSION_ID" "$attempts" true "$(changed_flag)" "$RESULT" "$VERIFY_OUT"
     exit 0
+  fi
+  if [[ "$VERIFY_FATAL" -eq 1 ]]; then
+    emit BLOCKED "$SESSION_ID" "$attempts" false "$(changed_flag)" "$RESULT" "$VERIFY_OUT"
+    exit 1
   fi
 done
 
