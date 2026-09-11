@@ -92,10 +92,11 @@ Walk through and confirm:
    `<branch>-work` path; the main checkout is untouched.
 2. **Dependency folders cloned** — if the plan needs `node_modules` or similar, check
    `copied` in the prepare output; copies are isolated from the main tree.
-3. **Task delegated** — pick a coder from the menu; probe passes; coder-delegator
-   returns `DONE` with a real `session_id` and verified result inside the worktree.
-4. **Fast-forward** — after your review, `git merge --ff-only <work-branch>` brings
-   the commit onto the feature branch.
+3. **Task completed** — pick a coder from the menu; the probe passes; the direct
+   lifecycle returns `DONE` with a real session id and commit id, and leaves the
+   worktree clean.
+4. **Review before advance** — confirm the controller reviews the reported commit
+   before it fast-forwards the work branch onto the feature branch.
 5. **Worktree removed** — `worktree.sh remove` succeeds when all work was merged.
 
 If `remove` returns `REFUSED`, unmerged commits remain on the work branch — resolve
@@ -108,6 +109,30 @@ before deleting.
 - **BLOCKED review** — with auth broken, confirm no fabricated review is returned.
 - **Dirty tree** — confirm `/implement-plans` refuses to start with uncommitted
   changes.
+
+## Coder lifecycle safety checks
+
+Run each check only in a throwaway repository or disposable branch.
+
+1. Start a deliberately slow coding task. While it owns the worktree, start a second
+   task against that worktree. Confirm the second task is refused before its coder
+   starts and the first task's files remain unchanged.
+2. Run a safe task that writes a marker file and then exceeds its timeout. Confirm
+   the result is `BLOCKED`, the marker remains, and a fresh task cannot start.
+3. Resume that task with both its reported lifecycle id and session id. Confirm the
+   task can complete and commit. Confirm either identifier alone or a wrong identifier
+   is refused.
+4. Exercise quarantine with a controlled process that stays alive. Confirm recovery
+   refuses while the recorded process is alive. Stop the process, run explicit
+   recovery, and confirm the files are unchanged before resuming.
+5. Give the lifecycle two verification commands that append different markers to a
+   file. Confirm they run in order. Make the second fail once and confirm both commands
+   rerun in the same order.
+6. Pass a verification value beginning with `server:`. Confirm input validation
+   rejects it before a coder starts.
+
+Clean up only after every spawned process is confirmed stopped and each disposable
+worktree is clean.
 
 ## Cleanup
 

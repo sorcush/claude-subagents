@@ -69,8 +69,9 @@ harness_run() {
   [[ -n "$sess" ]] && cmd+=(--resume "$sess")
   cmd+=("$prompt")
 
-  # claude has no working-folder flag, so enter $dir ourselves.
-  ( cd "$dir" && run_with_timeout "${CSC_RUN_TIMEOUT:-1800}" "${cmd[@]}" </dev/null ) \
+  # claude has no working-folder flag. Let the timeout helper enter $dir so its
+  # process-group state remains visible in this shell after the command exits.
+  run_with_timeout_in "${CSC_RUN_TIMEOUT:-1800}" "$dir" "${cmd[@]}" </dev/null \
     >"$outfile" 2>>"$ERR_FILE"
   rc=$?
 
@@ -96,11 +97,17 @@ harness_run() {
   done < "$outfile"
   rm -f "$outfile"
 
-  # 124 is how run_with_timeout reports a timeout across the subshell above.
-  # A variable set inside that subshell would have been discarded.
-  if [[ $rc -eq "$TIMEOUT_EXIT" ]]; then
+  if [[ "$RUN_GROUP_STOPPED" -ne 1 ]]; then
+    echo "writer process group could not be confirmed stopped" >> "$ERR_FILE"
+    return 1
+  fi
+  if [[ "$TIMEOUT_HIT" -eq 1 ]]; then
     echo "timed out after ${CSC_RUN_TIMEOUT:-1800}s" >> "$ERR_FILE"
     HARNESS_TIMED_OUT=1
+    return 1
+  fi
+  if [[ "$RUN_GROUP_LINGERED" -eq 1 ]]; then
+    echo "writer left a process running after its final result" >> "$ERR_FILE"
     return 1
   fi
   [[ $rc -ne 0 ]] && return 1

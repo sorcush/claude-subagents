@@ -8,18 +8,76 @@
 # after the caller has already reported BLOCKED.
 
 TIMEOUT_HIT=0
+RUN_GROUP_STOPPED=0
+RUN_GROUP_LINGERED=0
+RUN_GROUP_ID=""
 
 TIMEOUT_EXIT=124   # same convention as GNU `timeout`
+LINGERING_EXIT=125
+UNCONTAINED_EXIT=126
+
+timeout_group_has_live_members() {  # <process-group-id>
+  local pgid="$1" rows
+  kill -0 -"$pgid" 2>/dev/null || return 1
+  rows="$(ps -axo pgid=,stat= 2>/dev/null)" || return 0
+  awk -v wanted="$pgid" '
+    $1 == wanted && $2 !~ /^Z/ { found=1 }
+    END { exit(found ? 0 : 1) }
+  ' <<<"$rows"
+}
+
+timeout_stop_group() {  # <process-group-id>
+  local pgid="$1" deadline
+  timeout_group_has_live_members "$pgid" || return 0
+  kill -TERM -"$pgid" 2>/dev/null
+  deadline=$((SECONDS + 5))
+  while timeout_group_has_live_members "$pgid" && [[ $SECONDS -lt $deadline ]]; do
+    sleep 0.1
+  done
+  if timeout_group_has_live_members "$pgid"; then
+    kill -KILL -"$pgid" 2>/dev/null
+  fi
+  deadline=$((SECONDS + 5))
+  while timeout_group_has_live_members "$pgid" && [[ $SECONDS -lt $deadline ]]; do
+    sleep 0.1
+  done
+  ! timeout_group_has_live_members "$pgid"
+}
+
+timeout_write_group_marker() {  # <value>
+  local value="$1" tmp
+  [[ -n "${RUN_GROUP_RECORD_FILE:-}" ]] || return 0
+  tmp="${RUN_GROUP_RECORD_FILE}.tmp.$BASHPID.$RANDOM"
+  printf '%s\n' "$value" > "$tmp" || return 1
+  mv "$tmp" "$RUN_GROUP_RECORD_FILE"
+}
 
 # run_with_timeout <seconds> <command...>
 # Returns the command's exit status, or 124 if it had to be killed.
 # Also sets TIMEOUT_HIT, for callers that are not behind a subshell.
 run_with_timeout() {
-  local secs="$1"; shift
-  local flag pid watcher rc
-  local old_int old_term
+  local secs="$1"
+  shift
+  run_with_timeout_in "$secs" "$PWD" "$@"
+}
+
+# run_with_timeout_in <seconds> <directory> <command...>
+# Like run_with_timeout, but changes directory in the child so the caller keeps
+# TIMEOUT_HIT and the process-group state.
+run_with_timeout_in() {
+  local secs="$1" dir="$2"
+  shift 2
+  local flag pid watcher="" rc gate="" watchdog_pipe=""
+  local watchdog_anchor_fd="" watchdog_fd=""
+  local old_int old_term monitor_was_on=0
+  # Keep the deadline within the range Bash's timed read accepts reliably.
+  [[ "$secs" =~ ^[1-9][0-9]*$ && ${#secs} -le 9 ]] || return 2
+  [[ -d "$dir" ]] || return 2
   flag="$(mktemp)"
   TIMEOUT_HIT=0
+  RUN_GROUP_STOPPED=0
+  RUN_GROUP_LINGERED=0
+  RUN_GROUP_ID=""
 
   # Save the caller's traps so they can be restored. `trap -` would discard
   # them, silently disarming whatever the calling script had installed.
@@ -29,58 +87,120 @@ run_with_timeout() {
   # `set -m` gives the background job its own process group, so a negative pid
   # in `kill` reaches the command and everything it spawned. Without this, a
   # timed-out CLI would keep running and could still be editing files.
-  set -m
-  "$@" &
-  pid=$!
-  set +m
+  [[ $- == *m* ]] && monitor_was_on=1
+  gate=$(mktemp) || { rm -f "$flag"; return "$UNCONTAINED_EXIT"; }
+  rm -f "$gate"
+  watchdog_pipe=$(mktemp) || { rm -f "$flag"; return "$UNCONTAINED_EXIT"; }
+  rm -f "$watchdog_pipe"
+  mkfifo "$watchdog_pipe" || {
+    rm -f "$flag" "$watchdog_pipe"
+    return "$UNCONTAINED_EXIT"
+  }
+  if [[ -n "${RUN_GROUP_RECORD_FILE:-}" ]]; then
+    timeout_write_group_marker pending || { rm -f "$flag"; return "$UNCONTAINED_EXIT"; }
+  fi
 
-  {
-    sleep "$secs"
-    # Write the flag BEFORE signalling. If we signalled first, the command
-    # could be reaped and its pid reused by an unrelated process before we
-    # recorded anything, and we would have no way to tell the two apart.
-    # `kill -0` alone is not enough: it also succeeds for a ZOMBIE, a process that
-    # has already exited and is only waiting to be reaped. Without the extra check,
-    # a command that finished at the exact instant the deadline fell would be
-    # recorded as a timeout and its real exit status thrown away.
-    if kill -0 "$pid" 2>/dev/null \
-       && ! ps -p "$pid" -o stat= 2>/dev/null | grep -q '^[[:space:]]*Z'; then
-      echo 1 > "$flag"
-      kill -TERM -"$pid" 2>/dev/null
-      sleep 5
-      # Re-check: the TERM may already have worked, and by now this pid could
-      # belong to something else entirely.
-      if [[ -s "$flag" ]] && kill -0 "$pid" 2>/dev/null; then
-        # Accepted limitation: signalling by PID cannot rule out the kernel having
-        # recycled that PID between the child being reaped and this line. Closing
-        # that needs pidfd, which is not portable to macOS. The window is
-        # microseconds and the guard above makes it narrower still.
-        kill -KILL -"$pid" 2>/dev/null
-      fi
+  set -m
+  (
+    gate_deadline=$((SECONDS + 5))
+    while [[ ! -e "$gate" ]]; do
+      [[ $SECONDS -lt $gate_deadline ]] || exit "$UNCONTAINED_EXIT"
+      sleep 0.01
+    done
+    cd "$dir" && exec "$@"
+  ) &
+  pid=$!
+  RUN_GROUP_ID="$pid"
+  # From this point onward, an interrupt kills the gated group even if marker
+  # setup or watcher setup has not finished yet.
+  trap 'kill -KILL -'"$pid"' 2>/dev/null' INT TERM
+  if [[ -n "${RUN_GROUP_RECORD_FILE:-}" ]]; then
+    if ! timeout_write_group_marker "$RUN_GROUP_ID"; then
+      timeout_stop_group "$RUN_GROUP_ID" >/dev/null 2>&1 || true
+      [[ "$monitor_was_on" -eq 1 ]] || set +m
+      rm -f "$flag" "$gate" "$watchdog_pipe"
+      return "$UNCONTAINED_EXIT"
     fi
-  } &
+  fi
+
+  # The parent holds the FIFO's only write descriptor. Normal completion sends
+  # "done"; parent death closes it and wakes the watchdog with EOF. The writer
+  # was forked before these descriptors existed, so it cannot keep the pipe open.
+  exec {watchdog_anchor_fd}<> "$watchdog_pipe" || {
+    timeout_stop_group "$RUN_GROUP_ID" >/dev/null 2>&1 || true
+    [[ "$monitor_was_on" -eq 1 ]] || set +m
+    rm -f "$flag" "$gate" "$watchdog_pipe"
+    return "$UNCONTAINED_EXIT"
+  }
+  {
+    eval "exec ${watchdog_anchor_fd}>&-"
+    watchdog_message=""
+    IFS= read -r -t "$secs" watchdog_message
+    watchdog_rc=$?
+    [[ "$watchdog_message" == done ]] && exit 0
+    # A timeout is distinct from EOF: EOF means the owner died. Both paths stop
+    # the writer, but only a real deadline sets TIMEOUT_HIT in the surviving owner.
+    if [[ "$watchdog_rc" -gt 128 ]]; then
+      echo 1 > "$flag"
+    fi
+    timeout_stop_group "$pid" >/dev/null 2>&1 || true
+  } < "$watchdog_pipe" &
   watcher=$!
+  exec {watchdog_fd}> "$watchdog_pipe" || {
+    kill -KILL -"$watcher" 2>/dev/null || true
+    timeout_stop_group "$RUN_GROUP_ID" >/dev/null 2>&1 || true
+    eval "exec ${watchdog_anchor_fd}>&-"
+    [[ "$monitor_was_on" -eq 1 ]] || set +m
+    rm -f "$flag" "$gate" "$watchdog_pipe"
+    return "$UNCONTAINED_EXIT"
+  }
+  eval "exec ${watchdog_anchor_fd}>&-"
+  watchdog_anchor_fd=""
+  rm -f "$watchdog_pipe"
 
   # Deliberately untested: triggering this trap needs a signal delivered mid-wait.
   # While the child runs, an interrupt should take the whole group down rather
   # than orphaning it.
-  trap 'kill -KILL -'"$pid"' 2>/dev/null; kill '"$watcher"' 2>/dev/null' INT TERM
+  trap 'kill -KILL -'"$pid"' 2>/dev/null; kill -KILL -'"$watcher"' 2>/dev/null' INT TERM
+  : > "$gate"
+  [[ "$monitor_was_on" -eq 1 ]] || set +m
 
-  wait "$pid"; rc=$?
+  wait "$pid" 2>/dev/null; rc=$?
 
-  # Stop the watcher first, so it cannot signal a pid that has now been reaped.
-  kill "$watcher" 2>/dev/null
+  # Tell the watchdog that the writer finished before its deadline, then close
+  # the descriptor. If the deadline already fired, the write side is simply
+  # closed and the watchdog finishes its bounded cleanup.
+  if [[ ! -s "$flag" ]]; then
+    eval "printf 'done\\n' >&${watchdog_fd}" 2>/dev/null || true
+  fi
+  eval "exec ${watchdog_fd}>&-"
+  watchdog_fd=""
   wait "$watcher" 2>/dev/null
 
   # Restore exactly what the caller had, including "no trap at all".
   if [[ -n "$old_int" ]];  then eval "$old_int";  else trap - INT;  fi
   if [[ -n "$old_term" ]]; then eval "$old_term"; else trap - TERM; fi
 
-  if [[ -s "$flag" ]]; then
-    TIMEOUT_HIT=1
-    rm -f "$flag"
-    return "$TIMEOUT_EXIT"
+  [[ -s "$flag" ]] && TIMEOUT_HIT=1
+
+  if timeout_group_has_live_members "$RUN_GROUP_ID"; then
+    [[ "$TIMEOUT_HIT" -eq 0 ]] && RUN_GROUP_LINGERED=1
+    timeout_stop_group "$RUN_GROUP_ID" || true
   fi
+
+  if timeout_group_has_live_members "$RUN_GROUP_ID"; then
+    RUN_GROUP_STOPPED=0
+    rm -f "$flag"
+    [[ -z "$gate" ]] || rm -f "$gate"
+    [[ -z "$watchdog_pipe" ]] || rm -f "$watchdog_pipe"
+    return "$UNCONTAINED_EXIT"
+  fi
+
+  RUN_GROUP_STOPPED=1
   rm -f "$flag"
+  [[ -z "$gate" ]] || rm -f "$gate"
+  [[ -z "$watchdog_pipe" ]] || rm -f "$watchdog_pipe"
+  [[ "$TIMEOUT_HIT" -eq 1 ]] && return "$TIMEOUT_EXIT"
+  [[ "$RUN_GROUP_LINGERED" -eq 1 ]] && return "$LINGERING_EXIT"
   return "$rc"
 }

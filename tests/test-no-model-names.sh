@@ -51,6 +51,21 @@ for f in cursor-coder-delegator.md cursor-reviewer-delegator.md codex-reviewer-d
   check "removed agents/$f" "1" "$([[ ! -e "$REPO/agents/$f" ]] && echo 1 || echo 0)"
 done
 
+check "coder-delegator agent removed" "1" \
+  "$([[ ! -e "$REPO/agents/coder-delegator.md" ]] && echo 1 || echo 0)"
+check "implement-plans directly invokes code-delegate" "1" \
+  "$([[ $(grep -cE 'scripts/code-delegate\.sh' "$REPO/commands/implement-plans.md") -gt 0 ]] && echo 1 || echo 0)"
+check "implement-plans validates code-delegate output" "1" \
+  "$([[ $(grep -cE 'scripts/validate-code-result\.sh' "$REPO/commands/implement-plans.md") -gt 0 ]] && echo 1 || echo 0)"
+check "implement-plans does not dispatch coder-delegator" "0" \
+  "$(grep -c 'Dispatch.*coder-delegator' "$REPO/commands/implement-plans.md")"
+for field in session_id writer_stopped worktree_clean commit_id; do
+  check "implement-plans requires $field before review" "1" \
+    "$([[ $(grep -c "$field" "$REPO/commands/implement-plans.md") -gt 0 ]] && echo 1 || echo 0)"
+done
+check "implement-plans checks changed and commit relationship" "1" \
+  "$([[ $(grep -c 'changed.*commit_id' "$REPO/commands/implement-plans.md") -gt 0 ]] && echo 1 || echo 0)"
+
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
