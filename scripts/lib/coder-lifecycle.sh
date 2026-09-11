@@ -290,6 +290,8 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
     marker_value="$(<"$marker_file")"
     if [[ "$marker_value" =~ ^[1-9][0-9]*$ ]]; then
       pgid="$marker_value"
+    elif [[ "$marker_value" == pending ]]; then
+      pgid=""
     fi
   fi
   recorded_worktree="$(jq -r '.worktree // ""' "$LIFECYCLE_STATE_FILE" 2>/dev/null)"
@@ -322,9 +324,14 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
     lifecycle_guard_release >/dev/null 2>&1 || true
     return 1
   fi
-  if [[ "$state_name" == active \
-        && ( "$marker_present" -ne 1 || ! "$marker_value" =~ ^[1-9][0-9]*$ ) ]]; then
+  if [[ "$state_name" == active && "$marker_present" -ne 1 ]]; then
     LIFECYCLE_DIAGNOSTIC="writer launch state is incomplete; recovery cannot prove which process group owns the worktree"
+    lifecycle_guard_release >/dev/null 2>&1 || true
+    return 1
+  fi
+  if [[ "$state_name" == active && "$marker_value" != pending \
+        && ! "$marker_value" =~ ^[1-9][0-9]*$ ]]; then
+    LIFECYCLE_DIAGNOSTIC="writer launch state is invalid; recovery cannot prove which process group owns the worktree"
     lifecycle_guard_release >/dev/null 2>&1 || true
     return 1
   fi

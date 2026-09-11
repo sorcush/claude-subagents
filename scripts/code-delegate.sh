@@ -229,7 +229,7 @@ block_result() {
   LIFECYCLE_SESSION_ID="$SESSION_ID"
   LIFECYCLE_PROCESS_GROUP_ID="$RUN_GROUP_ID"
   if [[ "$quarantine" -eq 1 || "$WRITER_STOPPED" != true ]]; then
-    lifecycle_update quarantined "$SESSION_ID" "$RUN_GROUP_ID" "$WRITER_STOPPED" "$DIAGNOSTIC" >/dev/null 2>&1 || true
+    lifecycle_quarantine "$DIAGNOSTIC" >/dev/null 2>&1 || true
   else
     lifecycle_block_recoverable "$DIAGNOSTIC" >/dev/null 2>&1 || true
   fi

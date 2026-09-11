@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `.claude-plugin/reviewers.json` and `.claude-plugin/coders.json`.
 - `scripts/sync-models.sh` and its two tests are removed. Nothing needs
   regenerating: the orchestrator reads the pool at run time.
+- `agents/coder-delegator.md` is removed. `/implement-plans` now invokes the
+  synchronous coder lifecycle directly; callers using that subagent name must
+  switch to `/implement-plans`.
 
 ### Added
 - Configurable reviewer and coder pools; adding a model is one JSON entry.

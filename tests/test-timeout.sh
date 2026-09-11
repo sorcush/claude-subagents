@@ -29,6 +29,22 @@ check "failing command returns its own status" "1" "$?"
 check "failing command does not set TIMEOUT_HIT" "0" "$TIMEOUT_HIT"
 check "finished command reports group stopped" "1" "$RUN_GROUP_STOPPED"
 
+# A fast command must also stop the watchdog's own timer process. Killing only
+# the watchdog shell leaves one orphaned sleep alive for the full timeout.
+watchdog_before="$(ps -axo pid=,command= 2>/dev/null \
+  | awk '$2 ~ /(^|\/)sleep$/ && $3 == "73" {print $1}')"
+run_with_timeout 73 true
+watchdog_after="$(ps -axo pid=,command= 2>/dev/null \
+  | awk '$2 ~ /(^|\/)sleep$/ && $3 == "73" {print $1}')"
+new_watchdogs=""
+for watchdog_pid in $watchdog_after; do
+  if ! grep -qx "$watchdog_pid" <<<"$watchdog_before"; then
+    new_watchdogs="${new_watchdogs}${new_watchdogs:+ }$watchdog_pid"
+  fi
+done
+check "fast command leaves no watchdog timer" "" "$new_watchdogs"
+for watchdog_pid in $new_watchdogs; do kill "$watchdog_pid" 2>/dev/null || true; done
+
 # --- the caller can select a working directory without a subshell ---
 mkdir "$TMP/run-here"
 run_with_timeout_in 10 "$TMP/run-here" bash -c 'pwd > observed-pwd'
@@ -118,10 +134,54 @@ else
   check "lingering child is gone" "1" "$gone"
 fi
 
-# The hook changes only the final observation. Real cleanup still runs.
-TIMEOUT_TEST_FORCE_UNCONTAINED=1 run_with_timeout 10 true
+# Simulate a group that remains observable after cleanup without a shipped
+# test-only environment switch.
+timeout_group_has_live_members() { return 0; }
+timeout_stop_group() { return 1; }
+run_with_timeout 10 true
 check "unconfirmed process-group shutdown exits 126" "126" "$?"
 check "unconfirmed process group is not stopped" "0" "$RUN_GROUP_STOPPED"
+source "$HERE/../scripts/lib/timeout.sh"
+
+# If the parent dies between spawning the gated child and opening the gate,
+# the child must eventually exit without ever running the requested command.
+gate_ready="$TMP/gate-ready"
+gate_pgid_file="$TMP/gate-pgid"
+gate_marker="$TMP/gate-marker"
+gate_command_ran="$TMP/gate-command-ran"
+timeout_write_group_marker() {
+  if [[ "$1" == pending ]]; then
+    printf 'pending\n' > "$RUN_GROUP_RECORD_FILE"
+  else
+    printf '%s\n' "$RUN_GROUP_ID" > "$gate_pgid_file"
+    : > "$gate_ready"
+    while :; do :; done
+  fi
+}
+(
+  export TMPDIR="$TMP"
+  RUN_GROUP_RECORD_FILE="$gate_marker"
+  run_with_timeout 60 bash -c ": > '$gate_command_ran'"
+) &
+gate_parent=$!
+for _ in $(seq 1 100); do
+  [[ -s "$gate_pgid_file" && -e "$gate_ready" ]] && break
+  sleep 0.05
+done
+gate_pgid="$(cat "$gate_pgid_file" 2>/dev/null)"
+kill -KILL "$gate_parent" 2>/dev/null
+wait "$gate_parent" 2>/dev/null
+gate_stopped=0
+for _ in $(seq 1 70); do
+  if ! timeout_group_has_live_members "$gate_pgid"; then gate_stopped=1; break; fi
+  sleep 0.1
+done
+check "unopened launch gate exits after parent death" "1" "$gate_stopped"
+check "unopened launch gate never runs command" "0" \
+  "$([[ -e "$gate_command_ran" ]] && echo 1 || echo 0)"
+if [[ "$gate_stopped" -ne 1 ]]; then timeout_stop_group "$gate_pgid" >/dev/null 2>&1 || true; fi
+source "$HERE/../scripts/lib/timeout.sh"
+unset RUN_GROUP_RECORD_FILE
 
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"

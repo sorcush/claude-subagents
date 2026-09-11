@@ -92,7 +92,14 @@ run_with_timeout_in() {
   fi
 
   set -m
-  ( while [[ ! -e "$gate" ]]; do sleep 0.01; done; cd "$dir" && exec "$@" ) &
+  (
+    gate_deadline=$((SECONDS + 5))
+    while [[ ! -e "$gate" ]]; do
+      [[ $SECONDS -lt $gate_deadline ]] || exit "$UNCONTAINED_EXIT"
+      sleep 0.01
+    done
+    cd "$dir" && exec "$@"
+  ) &
   pid=$!
   RUN_GROUP_ID="$pid"
   # From this point onward, an interrupt kills the gated group even if marker
@@ -127,14 +134,14 @@ run_with_timeout_in() {
   # Deliberately untested: triggering this trap needs a signal delivered mid-wait.
   # While the child runs, an interrupt should take the whole group down rather
   # than orphaning it.
-  trap 'kill -KILL -'"$pid"' 2>/dev/null; kill '"$watcher"' 2>/dev/null' INT TERM
+  trap 'kill -KILL -'"$pid"' 2>/dev/null; kill -KILL -'"$watcher"' 2>/dev/null' INT TERM
   : > "$gate"
   [[ "$monitor_was_on" -eq 1 ]] || set +m
 
   wait "$pid"; rc=$?
 
   # Stop the watcher first, so it cannot signal a pid that has now been reaped.
-  kill "$watcher" 2>/dev/null
+  kill -TERM -"$watcher" 2>/dev/null
   wait "$watcher" 2>/dev/null
 
   # Restore exactly what the caller had, including "no trap at all".
@@ -148,8 +155,7 @@ run_with_timeout_in() {
     timeout_stop_group "$RUN_GROUP_ID" || true
   fi
 
-  if [[ "${TIMEOUT_TEST_FORCE_UNCONTAINED:-0}" == "1" ]] \
-     || timeout_group_has_live_members "$RUN_GROUP_ID"; then
+  if timeout_group_has_live_members "$RUN_GROUP_ID"; then
     RUN_GROUP_STOPPED=0
     rm -f "$flag"
     [[ -z "$gate" ]] || rm -f "$gate"

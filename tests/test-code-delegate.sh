@@ -418,19 +418,6 @@ check "lingering writer is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
 check "lingering writer is stopped" "0" "$(kill -0 "$linger_pid" 2>/dev/null && echo 1 || echo 0)"
 clear_lifecycle
 
-# --- an unconfirmed shutdown quarantines until explicit recovery ---
-out=$(TIMEOUT_TEST_FORCE_UNCONTAINED=1 run --coder c-codex --verify-cmd true 2>/dev/null)
-quarantine_lifecycle=$(echo "$out" | jq -r '.lifecycle_id')
-quarantine_session=$(echo "$out" | jq -r '.session_id')
-check "unconfirmed shutdown is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
-check "unconfirmed shutdown retains quarantine lock" "1" \
-  "$([[ -d "$private_git/claude-subagents-coder.lock" ]] && echo 1 || echo 0)"
-out=$(bash "$SCRIPT" recover --cwd "$WT" --lifecycle-id "$quarantine_lifecycle" 2>/dev/null)
-check "stopped quarantine can be recovered" "RECOVERED" "$(echo "$out" | jq -r '.status')"
-out=$(run --coder c-codex --verify-cmd true --session "$quarantine_session" \
-      --lifecycle-id "$quarantine_lifecycle" 2>/dev/null)
-check "recovered lifecycle can resume" "DONE" "$(echo "$out" | jq -r '.status')"
-
 # --- coder-owned Git changes are preserved and quarantined ---
 WT_TAMPER="$TMP/tamper-work"
 git -C "$MAIN" worktree add -q -b feature/tamper "$WT_TAMPER" main

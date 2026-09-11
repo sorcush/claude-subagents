@@ -160,8 +160,8 @@ check "recovery has no force option" "2" "$?"
 rm -rf "$LIFECYCLE_LOCK_DIR"
 rm -f "$LIFECYCLE_STATE_FILE"
 
-# An active writer phase is recoverable only when its atomic process marker is
-# complete, and the marker takes precedence over an older state snapshot.
+# A pending marker proves the gated command never started, so a dead owner can
+# be recovered without discarding any work.
 lifecycle_open "$WT" c-codex ""
 marker_id="$LIFECYCLE_ID"
 lifecycle_update active sess-marker 999999 false ""
@@ -169,13 +169,26 @@ state_tmp="$LIFECYCLE_STATE_FILE.test"
 jq '.owner_pid=999999 | .owner_started=""' "$LIFECYCLE_STATE_FILE" > "$state_tmp"
 mv "$state_tmp" "$LIFECYCLE_STATE_FILE"
 printf 'pending\n' > "$LIFECYCLE_LOCK_DIR/process_group_id"
-( source "$LIB"; lifecycle_recover "$WT" "$marker_id" ) >/dev/null 2>&1
-check "recovery rejects an incomplete process marker" "1" "$?"
+lifecycle_recover "$WT" "$marker_id" >/dev/null 2>&1
+check "recovery accepts a pending gated launch" "0" "$?"
+lifecycle_open "$WT" c-codex "$marker_id"
+lifecycle_finish
 
+# Missing and invalid markers still cannot prove what ran.
+lifecycle_open "$WT" c-codex ""
+marker_id="$LIFECYCLE_ID"
+lifecycle_update active sess-marker 999999 false ""
+state_tmp="$LIFECYCLE_STATE_FILE.test"
+jq '.owner_pid=999999 | .owner_started=""' "$LIFECYCLE_STATE_FILE" > "$state_tmp"
+mv "$state_tmp" "$LIFECYCLE_STATE_FILE"
 rm -f "$LIFECYCLE_LOCK_DIR/process_group_id"
 ( source "$LIB"; lifecycle_recover "$WT" "$marker_id" ) >/dev/null 2>&1
 check "recovery rejects a missing active process marker" "1" "$?"
+printf 'invalid\n' > "$LIFECYCLE_LOCK_DIR/process_group_id"
+( source "$LIB"; lifecycle_recover "$WT" "$marker_id" ) >/dev/null 2>&1
+check "recovery rejects an invalid active process marker" "1" "$?"
 
+# A current numeric marker takes precedence over an older state snapshot.
 set -m
 ( sleep 300 ) &
 marker_group=$!
