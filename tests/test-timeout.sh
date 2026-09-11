@@ -19,6 +19,16 @@ check() {
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# Invalid deadlines must fail before any child or watchdog is launched.
+run_with_timeout 0 sleep 5
+check "zero timeout is rejected" "2" "$?"
+run_with_timeout invalid true
+check "non-numeric timeout is rejected" "2" "$?"
+oversize_ran="$TMP/oversize-ran"
+run_with_timeout 999999999999999999999999999999999999 bash -c ": > '$oversize_ran'"
+check "oversized timeout is rejected" "2" "$?"
+check "oversized timeout starts no command" "0" "$([[ ! -e "$oversize_ran" ]]; echo $?)"
+
 # --- a fast command is untouched ---
 run_with_timeout 10 true
 check "fast command returns its own status" "0" "$?"

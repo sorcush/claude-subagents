@@ -70,6 +70,8 @@ run_with_timeout_in() {
   local flag pid watcher="" rc gate="" watchdog_pipe=""
   local watchdog_anchor_fd="" watchdog_fd=""
   local old_int old_term monitor_was_on=0
+  # Keep the deadline within the range Bash's timed read accepts reliably.
+  [[ "$secs" =~ ^[1-9][0-9]*$ && ${#secs} -le 9 ]] || return 2
   [[ -d "$dir" ]] || return 2
   flag="$(mktemp)"
   TIMEOUT_HIT=0
