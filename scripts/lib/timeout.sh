@@ -67,7 +67,8 @@ run_with_timeout() {
 run_with_timeout_in() {
   local secs="$1" dir="$2"
   shift 2
-  local flag pid watcher="" rc gate=""
+  local flag pid watcher="" rc gate="" watchdog_pipe=""
+  local watchdog_anchor_fd="" watchdog_fd=""
   local old_int old_term monitor_was_on=0
   [[ -d "$dir" ]] || return 2
   flag="$(mktemp)"
@@ -87,6 +88,12 @@ run_with_timeout_in() {
   [[ $- == *m* ]] && monitor_was_on=1
   gate=$(mktemp) || { rm -f "$flag"; return "$UNCONTAINED_EXIT"; }
   rm -f "$gate"
+  watchdog_pipe=$(mktemp) || { rm -f "$flag"; return "$UNCONTAINED_EXIT"; }
+  rm -f "$watchdog_pipe"
+  mkfifo "$watchdog_pipe" || {
+    rm -f "$flag" "$watchdog_pipe"
+    return "$UNCONTAINED_EXIT"
+  }
   if [[ -n "${RUN_GROUP_RECORD_FILE:-}" ]]; then
     timeout_write_group_marker pending || { rm -f "$flag"; return "$UNCONTAINED_EXIT"; }
   fi
@@ -109,27 +116,45 @@ run_with_timeout_in() {
     if ! timeout_write_group_marker "$RUN_GROUP_ID"; then
       timeout_stop_group "$RUN_GROUP_ID" >/dev/null 2>&1 || true
       [[ "$monitor_was_on" -eq 1 ]] || set +m
-      rm -f "$flag" "$gate"
+      rm -f "$flag" "$gate" "$watchdog_pipe"
       return "$UNCONTAINED_EXIT"
     fi
   fi
 
+  # The parent holds the FIFO's only write descriptor. Normal completion sends
+  # "done"; parent death closes it and wakes the watchdog with EOF. The writer
+  # was forked before these descriptors existed, so it cannot keep the pipe open.
+  exec {watchdog_anchor_fd}<> "$watchdog_pipe" || {
+    timeout_stop_group "$RUN_GROUP_ID" >/dev/null 2>&1 || true
+    [[ "$monitor_was_on" -eq 1 ]] || set +m
+    rm -f "$flag" "$gate" "$watchdog_pipe"
+    return "$UNCONTAINED_EXIT"
+  }
   {
-    sleep "$secs"
-    # Write the flag BEFORE signalling. If we signalled first, the command
-    # could be reaped and its pid reused by an unrelated process before we
-    # recorded anything, and we would have no way to tell the two apart.
-    # `kill -0` alone is not enough: it also succeeds for a ZOMBIE, a process that
-    # has already exited and is only waiting to be reaped. Without the extra check,
-    # a command that finished at the exact instant the deadline fell would be
-    # recorded as a timeout and its real exit status thrown away.
-    if kill -0 "$pid" 2>/dev/null \
-       && ! ps -p "$pid" -o stat= 2>/dev/null | grep -q '^[[:space:]]*Z'; then
+    eval "exec ${watchdog_anchor_fd}>&-"
+    watchdog_message=""
+    IFS= read -r -t "$secs" watchdog_message
+    watchdog_rc=$?
+    [[ "$watchdog_message" == done ]] && exit 0
+    # A timeout is distinct from EOF: EOF means the owner died. Both paths stop
+    # the writer, but only a real deadline sets TIMEOUT_HIT in the surviving owner.
+    if [[ "$watchdog_rc" -gt 128 ]]; then
       echo 1 > "$flag"
-      kill -TERM -"$pid" 2>/dev/null
     fi
-  } &
+    timeout_stop_group "$pid" >/dev/null 2>&1 || true
+  } < "$watchdog_pipe" &
   watcher=$!
+  exec {watchdog_fd}> "$watchdog_pipe" || {
+    kill -KILL -"$watcher" 2>/dev/null || true
+    timeout_stop_group "$RUN_GROUP_ID" >/dev/null 2>&1 || true
+    eval "exec ${watchdog_anchor_fd}>&-"
+    [[ "$monitor_was_on" -eq 1 ]] || set +m
+    rm -f "$flag" "$gate" "$watchdog_pipe"
+    return "$UNCONTAINED_EXIT"
+  }
+  eval "exec ${watchdog_anchor_fd}>&-"
+  watchdog_anchor_fd=""
+  rm -f "$watchdog_pipe"
 
   # Deliberately untested: triggering this trap needs a signal delivered mid-wait.
   # While the child runs, an interrupt should take the whole group down rather
@@ -138,10 +163,16 @@ run_with_timeout_in() {
   : > "$gate"
   [[ "$monitor_was_on" -eq 1 ]] || set +m
 
-  wait "$pid"; rc=$?
+  wait "$pid" 2>/dev/null; rc=$?
 
-  # Stop the watcher first, so it cannot signal a pid that has now been reaped.
-  kill -TERM -"$watcher" 2>/dev/null
+  # Tell the watchdog that the writer finished before its deadline, then close
+  # the descriptor. If the deadline already fired, the write side is simply
+  # closed and the watchdog finishes its bounded cleanup.
+  if [[ ! -s "$flag" ]]; then
+    eval "printf 'done\\n' >&${watchdog_fd}" 2>/dev/null || true
+  fi
+  eval "exec ${watchdog_fd}>&-"
+  watchdog_fd=""
   wait "$watcher" 2>/dev/null
 
   # Restore exactly what the caller had, including "no trap at all".
@@ -159,12 +190,14 @@ run_with_timeout_in() {
     RUN_GROUP_STOPPED=0
     rm -f "$flag"
     [[ -z "$gate" ]] || rm -f "$gate"
+    [[ -z "$watchdog_pipe" ]] || rm -f "$watchdog_pipe"
     return "$UNCONTAINED_EXIT"
   fi
 
   RUN_GROUP_STOPPED=1
   rm -f "$flag"
   [[ -z "$gate" ]] || rm -f "$gate"
+  [[ -z "$watchdog_pipe" ]] || rm -f "$watchdog_pipe"
   [[ "$TIMEOUT_HIT" -eq 1 ]] && return "$TIMEOUT_EXIT"
   [[ "$RUN_GROUP_LINGERED" -eq 1 ]] && return "$LINGERING_EXIT"
   return "$rc"

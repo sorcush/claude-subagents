@@ -183,6 +183,77 @@ if [[ "$gate_stopped" -ne 1 ]]; then timeout_stop_group "$gate_pgid" >/dev/null 
 source "$HERE/../scripts/lib/timeout.sh"
 unset RUN_GROUP_RECORD_FILE
 
+# The watchdog must force-stop a writer that ignores graceful termination;
+# otherwise the caller blocks forever in wait after the timeout fires.
+cat > "$TMP/ignore-term.sh" <<'IGNORE_TERM'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do sleep 1; done
+IGNORE_TERM
+chmod +x "$TMP/ignore-term.sh"
+ignore_marker="$TMP/ignore-marker"
+ignore_result="$TMP/ignore-result"
+(
+  RUN_GROUP_RECORD_FILE="$ignore_marker"
+  run_with_timeout 1 "$TMP/ignore-term.sh"
+  printf '%s\n' "$?" > "$ignore_result"
+) &
+ignore_owner=$!
+ignore_finished=0
+for _ in $(seq 1 90); do
+  if [[ -s "$ignore_result" ]]; then ignore_finished=1; break; fi
+  sleep 0.1
+done
+check "TERM-ignoring writer is forcibly stopped" "1" "$ignore_finished"
+if [[ "$ignore_finished" -eq 1 ]]; then
+  check "TERM-ignoring timeout returns 124" "124" "$(cat "$ignore_result")"
+else
+  ignore_pgid="$(cat "$ignore_marker" 2>/dev/null)"
+  [[ "$ignore_pgid" =~ ^[1-9][0-9]*$ ]] && kill -KILL -"$ignore_pgid" 2>/dev/null || true
+  kill -KILL "$ignore_owner" 2>/dev/null || true
+fi
+wait "$ignore_owner" 2>/dev/null
+
+# Once the watchdog has started, killing its owner must make the watchdog stop
+# the writer immediately rather than sleep until the original timeout expires.
+crash_marker="$TMP/watcher-crash-marker"
+(
+  RUN_GROUP_RECORD_FILE="$crash_marker"
+  run_with_timeout 61 sleep 61
+) &
+crash_owner=$!
+watcher_pgid=""
+for _ in $(seq 1 100); do
+  crash_writer_pgid="$(cat "$crash_marker" 2>/dev/null)"
+  if [[ "$crash_writer_pgid" =~ ^[1-9][0-9]*$ ]]; then
+    watcher_pgid="$(ps -axo ppid=,pgid= 2>/dev/null \
+      | awk -v owner="$crash_owner" -v writer="$crash_writer_pgid" \
+        '$1 == owner && $2 != writer {print $2; exit}')"
+    [[ "$watcher_pgid" =~ ^[1-9][0-9]*$ ]] && break
+  fi
+  sleep 0.05
+done
+kill -KILL "$crash_owner" 2>/dev/null
+wait "$crash_owner" 2>/dev/null
+writer_stopped_after_crash=0
+watchdog_stopped_after_crash=0
+for _ in $(seq 1 90); do
+  timeout_group_has_live_members "$crash_writer_pgid" \
+    || writer_stopped_after_crash=1
+  timeout_group_has_live_members "$watcher_pgid" \
+    || watchdog_stopped_after_crash=1
+  [[ "$writer_stopped_after_crash" -eq 1 && "$watchdog_stopped_after_crash" -eq 1 ]] && break
+  sleep 0.1
+done
+check "owner death stops the writer group" "1" "$writer_stopped_after_crash"
+check "owner death retires the watchdog group" "1" "$watchdog_stopped_after_crash"
+if [[ "$writer_stopped_after_crash" -ne 1 ]]; then
+  timeout_stop_group "$crash_writer_pgid" >/dev/null 2>&1 || true
+fi
+if [[ "$watchdog_stopped_after_crash" -ne 1 ]]; then
+  timeout_stop_group "$watcher_pgid" >/dev/null 2>&1 || true
+fi
+
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

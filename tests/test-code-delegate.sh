@@ -346,7 +346,7 @@ check "interrupted lifecycle releases live lock" "0" \
   "$([[ -d "$signal_git/claude-subagents-coder.lock" ]] && echo 1 || echo 0)"
 clear_lifecycle_at "$WT_SIGNAL"
 
-# --- an abrupt controller death leaves an active record until the writer stops ---
+# --- an abrupt controller death makes the watchdog stop the writer ---
 WT_CRASH="$TMP/crash-work"
 git -C "$MAIN" worktree add -q -b feature/crash "$WT_CRASH" main
 crash_out="$TMP/crash-owner.json"
@@ -363,14 +363,12 @@ done
 crash_lifecycle=$(jq -r '.lifecycle_id' "$crash_git/claude-subagents-coder-state.json")
 kill -KILL "$crash_owner" 2>/dev/null
 wait "$crash_owner" 2>/dev/null
-out=$(bash "$SCRIPT" recover --cwd "$WT_CRASH" --lifecycle-id "$crash_lifecycle" 2>/dev/null)
-check "crashed active lifecycle refuses recovery while writer lives" "BLOCKED" \
-  "$(echo "$out" | jq -r '.status')"
-kill -TERM -"$crash_pgid" 2>/dev/null
-for _ in $(seq 1 50); do
+for _ in $(seq 1 100); do
   kill -0 -"$crash_pgid" 2>/dev/null || break
   sleep 0.1
 done
+check "crashed active lifecycle watchdog stops writer" "0" \
+  "$(kill -0 -"$crash_pgid" 2>/dev/null && echo 1 || echo 0)"
 out=$(bash "$SCRIPT" recover --cwd "$WT_CRASH" --lifecycle-id "$crash_lifecycle" 2>/dev/null)
 check "stale active lifecycle can be recovered" "RECOVERED" "$(echo "$out" | jq -r '.status')"
 clear_lifecycle_at "$WT_CRASH"
@@ -394,15 +392,12 @@ done
 verify_lifecycle=$(jq -r '.lifecycle_id' "$verify_git/claude-subagents-coder-state.json")
 kill -KILL "$verify_owner" 2>/dev/null
 wait "$verify_owner" 2>/dev/null
-out=$(bash "$SCRIPT" recover --cwd "$WT_VERIFY_CRASH" \
-  --lifecycle-id "$verify_lifecycle" 2>/dev/null)
-check "crashed verification keeps worktree quarantined while verifier lives" "BLOCKED" \
-  "$(echo "$out" | jq -r '.status')"
-kill -KILL -"$verify_pgid" 2>/dev/null
 for _ in $(seq 1 100); do
   kill -0 -"$verify_pgid" 2>/dev/null || break
   sleep 0.1
 done
+check "crashed verification watchdog stops verifier" "0" \
+  "$(kill -0 -"$verify_pgid" 2>/dev/null && echo 1 || echo 0)"
 out=$(bash "$SCRIPT" recover --cwd "$WT_VERIFY_CRASH" \
   --lifecycle-id "$verify_lifecycle" 2>/dev/null)
 check "stopped crashed verification can be recovered" "RECOVERED" \
@@ -498,15 +493,12 @@ hook_crash_lifecycle=$(jq -r '.lifecycle_id' \
   "$hook_crash_git/claude-subagents-coder-state.json")
 kill -KILL "$hook_owner" 2>/dev/null
 wait "$hook_owner" 2>/dev/null
-out=$(bash "$SCRIPT" recover --cwd "$WT_HOOK_CRASH" \
-  --lifecycle-id "$hook_crash_lifecycle" 2>/dev/null)
-check "crashed commit hook keeps worktree quarantined while hook lives" "BLOCKED" \
-  "$(echo "$out" | jq -r '.status')"
-kill -KILL -"$hook_pgid" 2>/dev/null
 for _ in $(seq 1 100); do
   kill -0 -"$hook_pgid" 2>/dev/null || break
   sleep 0.1
 done
+check "crashed commit watchdog stops hook" "0" \
+  "$(kill -0 -"$hook_pgid" 2>/dev/null && echo 1 || echo 0)"
 out=$(bash "$SCRIPT" recover --cwd "$WT_HOOK_CRASH" \
   --lifecycle-id "$hook_crash_lifecycle" 2>/dev/null)
 check "stopped crashed commit hook can be recovered" "RECOVERED" \
