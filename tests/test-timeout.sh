@@ -27,6 +27,14 @@ check "fast command does not set TIMEOUT_HIT" "0" "$TIMEOUT_HIT"
 run_with_timeout 10 false
 check "failing command returns its own status" "1" "$?"
 check "failing command does not set TIMEOUT_HIT" "0" "$TIMEOUT_HIT"
+check "finished command reports group stopped" "1" "$RUN_GROUP_STOPPED"
+
+# --- the caller can select a working directory without a subshell ---
+mkdir "$TMP/run-here"
+run_with_timeout_in 10 "$TMP/run-here" bash -c 'pwd > observed-pwd'
+check "directory-aware run succeeds" "0" "$?"
+check "directory-aware run uses requested cwd" "$TMP/run-here" \
+  "$(cat "$TMP/run-here/observed-pwd" 2>/dev/null)"
 
 # --- a slow command is killed ---
 start=$SECONDS
@@ -83,6 +91,37 @@ else
   done
   check "grandchild is really gone, not just unsignalable" "1" "$gone"
 fi
+
+# --- a successful direct child must not hide a lingering writer ---
+cat > "$TMP/linger.sh" <<'LINGER'
+#!/usr/bin/env bash
+sleep 300 &
+echo $! > "$1"
+exit 0
+LINGER
+chmod +x "$TMP/linger.sh"
+
+run_with_timeout 10 "$TMP/linger.sh" "$TMP/linger.pid"
+check "normal exit with a live descendant is blocked" "125" "$?"
+check "lingering descendant is recorded" "1" "$RUN_GROUP_LINGERED"
+check "lingering process group is stopped" "1" "$RUN_GROUP_STOPPED"
+
+linger=$(cat "$TMP/linger.pid" 2>/dev/null || echo "")
+if [[ -z "$linger" ]]; then
+  check "lingering child pid was recorded" "1" "0"
+else
+  gone=0
+  for _ in $(seq 1 50); do
+    if ! ps -p "$linger" -o stat= 2>/dev/null | grep -qv '^[[:space:]]*Z'; then gone=1; break; fi
+    sleep 0.2
+  done
+  check "lingering child is gone" "1" "$gone"
+fi
+
+# The hook changes only the final observation. Real cleanup still runs.
+TIMEOUT_TEST_FORCE_UNCONTAINED=1 run_with_timeout 10 true
+check "unconfirmed process-group shutdown exits 126" "126" "$?"
+check "unconfirmed process group is not stopped" "0" "$RUN_GROUP_STOPPED"
 
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"
