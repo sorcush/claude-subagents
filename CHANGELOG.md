@@ -34,6 +34,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `-c sandbox_mode="read-only"`.
 - The verify command ran in the caller's directory rather than the coder's.
 
+## [2.4.0] - 2026-09-14
+
+### Added
+- add coder worktree ownership state
+- support structured verification commands
+
+### Changed
+- design single-owner coder lifecycle
+- explain safe coder task ownership
+
+### Fixed
+- verify delegated process groups stop
+- enforce single-owner coder lifecycle
+- run coder tasks synchronously
+- recover after reviewed git interference
+- harden coder lifecycle recovery
+- close coder lifecycle recovery races
+- close timeout lifecycle leaks
+- make timeout watchdog self-contained
+- reject invalid timeout values
+
 ## [2.3.0] - 2026-09-02
 
 ### Added
