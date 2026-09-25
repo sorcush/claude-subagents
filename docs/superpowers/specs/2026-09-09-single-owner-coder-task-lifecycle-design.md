@@ -228,9 +228,14 @@ On normal completion:
 4. Only then may verification or completion continue.
 
 If descendants remain after the direct child exits, the lifecycle treats them as
-lingering writers. It requests graceful termination, waits for the bounded grace
-period, then forcibly terminates the remaining group. The task is blocked rather than
-successful because the tool violated the process-lifecycle contract.
+lingering writers. It records which processes remain, requests graceful termination,
+waits for the bounded grace period, then forcibly terminates the remaining group.
+Once the whole group is confirmed stopped, nothing can still change files, so the
+command's own result stands and the lifecycle continues. The result carries a warning
+that names the processes it stopped. Some tools do this on every run: cursor-agent
+keeps a per-project worker alive for five minutes after it exits (issue #8), so
+blocking on leftovers would block every such task. If the group cannot be confirmed
+stopped, the worktree is quarantined as before.
 
 On timeout:
 
@@ -442,7 +447,8 @@ Automated tests use deterministic fake coders and real temporary Git worktrees.
 ### Hangs and process cleanup
 
 - Have a fake coder spawn a child that keeps running after the parent emits a final
-  answer. The lifecycle terminates the lingering group and returns blocked.
+  answer. The lifecycle terminates the lingering group before verification and
+  completes with a warning that names the stopped process.
 - Have a fake coder exceed its deadline after editing a file. The whole group stops,
   the file remains, the real session id is returned, and no later task is admitted.
 - Have a verification command exceed its deadline and assert the same preservation

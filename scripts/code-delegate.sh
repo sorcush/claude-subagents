@@ -64,14 +64,14 @@ if [[ "${1:-}" == "recover" ]]; then
       '{status:"RECOVERED",coder:$coder,session_id:$session,lifecycle_id:$lifecycle_id,
         attempts:0,verification_mode:"none",verification:[],verified:false,changed:true,
         commit_id:"",files_changed:[],worktree_clean:false,writer_stopped:true,
-        result:"",diagnostic:"quarantine cleared; resume the matching lifecycle"}'
+        result:"",diagnostic:"quarantine cleared; resume the matching lifecycle",warnings:[]}'
     exit 0
   fi
   jq -nc --arg lifecycle_id "$REQUESTED_LIFECYCLE_ID" --arg diagnostic "$LIFECYCLE_DIAGNOSTIC" \
     '{status:"BLOCKED",coder:"",session_id:"",lifecycle_id:$lifecycle_id,
       attempts:0,verification_mode:"none",verification:[],verified:false,changed:false,
       commit_id:"",files_changed:[],worktree_clean:false,writer_stopped:false,
-      result:"",diagnostic:$diagnostic}'
+      result:"",diagnostic:$diagnostic,warnings:[]}'
   exit 1
 fi
 
@@ -167,6 +167,7 @@ FILES_CHANGED='[]'
 WORKTREE_CLEAN=false
 WRITER_STOPPED=true
 DIAGNOSTIC=""
+WARNINGS='[]'
 VERIFY_OUT=""
 VERIFY_RC=0
 VERIFY_FATAL=0
@@ -181,11 +182,12 @@ emit_result() {
     --arg commit_id "$COMMIT_ID" --argjson files_changed "$FILES_CHANGED" \
     --argjson clean "$WORKTREE_CLEAN" --argjson stopped "$WRITER_STOPPED" \
     --arg result "$RESULT" --arg diagnostic "$DIAGNOSTIC" --arg vout "$VERIFY_OUT" \
+    --argjson warnings "$WARNINGS" \
     '{status:$status,coder:$coder,session_id:$session,lifecycle_id:$lifecycle_id,
       attempts:$attempts,verification_mode:$mode,verification:$verification,
       verified:$verified,changed:$changed,commit_id:$commit_id,
       files_changed:$files_changed,worktree_clean:$clean,writer_stopped:$stopped,
-      result:$result,diagnostic:$diagnostic,verify_output:$vout}'
+      result:$result,diagnostic:$diagnostic,verify_output:$vout,warnings:$warnings}'
 }
 
 refresh_observed() {
@@ -276,8 +278,12 @@ prepare_writer_phase() {
   lifecycle_update active "$SESSION_ID" "" false ""
 }
 
-record_writer_result() {
+record_writer_result() {  # <what-ran>
   WRITER_STOPPED=$([[ "$RUN_GROUP_STOPPED" -eq 1 ]] && echo true || echo false)
+  # Leftovers were already stopped and confirmed gone; they only earn a warning.
+  if [[ "$RUN_GROUP_LINGERED" -eq 1 ]]; then
+    WARNINGS="$(jq -c --arg warning "$(timeout_leftover_warning "$1")" '. + [$warning]' <<<"$WARNINGS")"
+  fi
   LIFECYCLE_PROCESS_GROUP_ID="$RUN_GROUP_ID"
   LIFECYCLE_SESSION_ID="$SESSION_ID"
   LIFECYCLE_ATTEMPTS="$ATTEMPTS"
@@ -305,7 +311,7 @@ run_verify() {
     VERIFY_RC=$?
     VERIFY_OUT="$(cat "$f")"
     rm -f "$f"
-    record_writer_result
+    record_writer_result "verification command '$verify_command'"
     timed_out=false
     [[ "$TIMEOUT_HIT" -eq 1 ]] && timed_out=true
     if [[ "$VERIFY_RC" -ne 0 && -z "$VERIFY_OUT" ]]; then
@@ -318,8 +324,7 @@ run_verify() {
       --arg command "$verify_command" --argjson exit_code "$VERIFY_RC" \
       --argjson timed_out "$timed_out" --arg output "$VERIFY_OUT" \
       '$previous + [{command:$command,exit_code:$exit_code,timed_out:$timed_out,output:$output}]')"
-    if [[ "$TIMEOUT_HIT" -eq 1 || "$VERIFY_RC" -eq "$LINGERING_EXIT" \
-          || "$VERIFY_RC" -eq "$UNCONTAINED_EXIT" ]]; then
+    if [[ "$TIMEOUT_HIT" -eq 1 || "$VERIFY_RC" -eq "$UNCONTAINED_EXIT" ]]; then
       VERIFY_FATAL=1
     fi
     [[ "$VERIFY_RC" -eq 0 ]] || break
@@ -337,7 +342,7 @@ run_coder() {
   fi
   harness_run "edit" "$ENTRY_MODEL" "$CWD" "$prompt" "$session"
   rc=$?
-  record_writer_result
+  record_writer_result "the coder"
   return "$rc"
 }
 
@@ -352,7 +357,7 @@ run_git_mutation() {
   run_with_timeout_in "${CSC_GIT_TIMEOUT:-1800}" "$CWD" \
     git -C "$CWD" "$@" >"$ERR_FILE" 2>&1
   rc=$?
-  record_writer_result
+  record_writer_result "git $1"
   return "$rc"
 }
 

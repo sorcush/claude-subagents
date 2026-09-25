@@ -130,6 +130,20 @@ check "BLOCKED exits 1" "1" "$?"
 # --- argument validation ---
 bash "$SCRIPT" --rubric-dir "$RUBRICS" >/dev/null 2>&1
 check "no args exits 2" "2" "$?"
+# A helper the reviewer CLI leaves running is stopped; the review still counts.
+for k in r-cursor r-codex r-claude; do
+  out=$(MOCK_RESULT="review body" MOCK_LINGER_PID_FILE="$TMP/review-linger.pid" \
+        run --reviewer "$k" --target spec 2>/dev/null)
+  check "$k leftover helper still REVIEWED" "REVIEWED" "$(echo "$out" | jq -r '.status')"
+  check "$k leftover helper keeps the report" "review body" "$(echo "$out" | jq -r '.report')"
+  check "$k leftover helper is named in a warning" "1" \
+    "$(echo "$out" | jq -r '.warnings[]' | grep -c 'after the reviewer exited')"
+  kill -0 "$(cat "$TMP/review-linger.pid")" 2>/dev/null
+  check "$k leftover helper is stopped" "1" "$?"
+done
+out=$(MOCK_RESULT="review body" run --reviewer r-codex --target spec 2>/dev/null)
+check "review without leftovers has no warnings" "0" "$(echo "$out" | jq '.warnings | length')"
+
 run --reviewer r-codex --target bogus >/dev/null 2>&1
 check "bad target exits 2" "2" "$?"
 run --reviewer r-codex --target spec --lenses nope >/dev/null 2>&1

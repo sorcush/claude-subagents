@@ -316,6 +316,13 @@ lifecycle_recover() {  # <cwd> <lifecycle-id>
       --argjson committed "$commit_files" '$recorded + $committed | unique' | jq -cS .)"
   fi
 
+  # A recoverable lifecycle was already released cleanly; it needs a resume, not
+  # recovery. Say so instead of a mismatch the operator cannot act on.
+  if [[ "$state_id" == "$requested_id" && "$state_name" == recoverable ]]; then
+    LIFECYCLE_DIAGNOSTIC="lifecycle $state_id is recoverable, not quarantined; resume it with --session $(jq -r '.session_id // ""' "$LIFECYCLE_STATE_FILE") --lifecycle-id $state_id"
+    lifecycle_guard_release >/dev/null 2>&1 || true
+    return 1
+  fi
   if [[ "$state_id" != "$requested_id" \
         || ( "$state_name" != quarantined && "$state_name" != active \
              && "$state_name" != admitted ) \

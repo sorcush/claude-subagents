@@ -25,6 +25,7 @@ harness_render() {  # <json-line>
 harness_probe() {
   local model="$1" out rc
   PROBE_REASON=""
+  PROBE_EXIT=""
   if ! command -v "$CSC_CURSOR_BIN" >/dev/null 2>&1 && [[ ! -x "$CSC_CURSOR_BIN" ]]; then
     PROBE_REASON="not-installed"; echo "cursor-agent not found: $CSC_CURSOR_BIN" >&2; return 1
   fi
@@ -35,6 +36,7 @@ harness_probe() {
     "$CSC_CURSOR_BIN" -p --force --trust --mode ask --output-format stream-json --model "$model" \
     "Reply with the single word READY." >"$out" 2>>"$ERR_FILE" </dev/null
   rc=$?
+  PROBE_EXIT=$rc
   if [[ $rc -eq "$TIMEOUT_EXIT" ]]; then PROBE_REASON="timeout"; return 1; fi
   if [[ $rc -ne 0 ]]; then
     PROBE_REASON="$(harness_classify "$(cat "$ERR_FILE" 2>/dev/null)")"
@@ -112,10 +114,6 @@ harness_run() {
   if [[ "$TIMEOUT_HIT" -eq 1 ]]; then
     echo "timed out after ${CSC_RUN_TIMEOUT:-1800}s" >> "$ERR_FILE"
     HARNESS_TIMED_OUT=1
-    return 1
-  fi
-  if [[ "$RUN_GROUP_LINGERED" -eq 1 ]]; then
-    echo "writer left a process running after its final result" >> "$ERR_FILE"
     return 1
   fi
   [[ $rc -ne 0 ]] && return 1

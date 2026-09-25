@@ -13,7 +13,10 @@
 #   MOCK_SLEEP=<secs>   -> stall this long after announcing the session, before
 #                          answering, to exercise timeouts that hit mid-run
 #   MOCK_LOG=<path>     -> append "ARGS: $*" (all argv, incl. the prompt) to this file
+#   MOCK_SILENT_EXIT=<n> -> exit with status n without writing anything
 set -euo pipefail
+
+if [[ -n "${MOCK_SILENT_EXIT:-}" ]]; then exit "$MOCK_SILENT_EXIT"; fi
 
 if [[ -n "${MOCK_LOG:-}" ]]; then echo "ARGS: $*" | tr '\n' ' ' >> "$MOCK_LOG"; fi
 if [[ -n "${MOCK_STDERR:-}" ]]; then echo "$MOCK_STDERR" >&2; fi

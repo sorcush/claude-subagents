@@ -42,5 +42,10 @@ if harness_probe "$ENTRY_MODEL"; then
   exit 0
 fi
 
-emit FAILED "${PROBE_REASON:-other}" "$(cat "$ERR_FILE" 2>/dev/null)"
+diagnostic="$(cat "$ERR_FILE" 2>/dev/null)"
+# A failure with nothing in it gives the user nothing to act on.
+if [[ -z "${diagnostic//[[:space:]]/}" ]]; then
+  diagnostic="probe failed with no error output from the $ENTRY_HARNESS CLI (exit status ${PROBE_EXIT:-unknown})"
+fi
+emit FAILED "${PROBE_REASON:-other}" "$diagnostic"
 exit 1

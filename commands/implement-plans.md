@@ -99,6 +99,10 @@ For each task:
    or explicit no-verification mode. Require `changed:true` to have a non-empty
    `commit_id`; require `changed:false` to have an empty `commit_id`.
 
+If a `DONE` result has a non-empty `warnings` list, show it to the user. A warning
+names processes the lifecycle stopped after they were left running; it does not
+change the outcome.
+
 The coder's answer text and the host process status are context only. Neither proves
 completion. The validator's observed lifecycle fields are the completion evidence.
 

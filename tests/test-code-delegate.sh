@@ -146,8 +146,16 @@ check "exhausted retries counts up"  "2"       "$(echo "$out" | jq -r '.attempts
 check "verify output is kept"        "1" \
   "$([[ -n "$(echo "$out" | jq -r '.verify_output')" ]] && echo 1 || echo 0)"
 clear_lifecycle
+out=$(MOCK_RESULT='DONE, everything passed' run --coder c-codex --verify-cmd false --max-retries 0 2>/dev/null)
 check "coder success claim cannot override failed verification" "BLOCKED" \
-  "$(MOCK_RESULT='DONE, everything passed' run --coder c-codex --verify-cmd false --max-retries 0 2>/dev/null | jq -r '.status')"
+  "$(echo "$out" | jq -r '.status')"
+# A recoverable lifecycle is resumed, not recovered; recover must say how.
+recoverable_id=$(echo "$out" | jq -r '.lifecycle_id')
+recoverable_session=$(echo "$out" | jq -r '.session_id')
+out=$(bash "$SCRIPT" recover --cwd "$WT" --lifecycle-id "$recoverable_id" 2>/dev/null)
+check "recover on a recoverable lifecycle points to resume" \
+  "lifecycle $recoverable_id is recoverable, not quarantined; resume it with --session $recoverable_session --lifecycle-id $recoverable_id" \
+  "$(echo "$out" | jq -r '.diagnostic')"
 clear_lifecycle
 # Guards the fallback above: a verify command that DOES print must have its real
 # output propagated verbatim. Without this, removing the capture entirely still
@@ -404,14 +412,36 @@ check "stopped crashed verification can be recovered" "RECOVERED" \
   "$(echo "$out" | jq -r '.status')"
 clear_lifecycle_at "$WT_VERIFY_CRASH"
 
-# --- a lingering child is killed and the task is blocked ---
+# --- a helper left running by the coder is stopped before verification ---
+# cursor-agent leaves a per-project worker alive after it exits. It is stopped
+# and named in a warning; the task itself still completes.
 linger_pid_file="$TMP/linger.pid"
-out=$(MOCK_LINGER_PID_FILE="$linger_pid_file" MOCK_LINGER_SECONDS=300 \
-      run --coder c-codex --verify-cmd true 2>/dev/null)
-linger_pid=$(cat "$linger_pid_file")
-check "lingering writer is BLOCKED" "BLOCKED" "$(echo "$out" | jq -r '.status')"
-check "lingering writer is stopped" "0" "$(kill -0 "$linger_pid" 2>/dev/null && echo 1 || echo 0)"
-clear_lifecycle
+linger_edit="$WT/after-linger.txt"
+for k in c-cursor c-codex c-claude; do
+  out=$(MOCK_LINGER_PID_FILE="$linger_pid_file" MOCK_LINGER_SECONDS=300 \
+        MOCK_EDIT_FILE="$linger_edit" \
+        run --coder "$k" \
+          --verify-cmd "! kill -0 \"\$(cat '$linger_pid_file')\" 2>/dev/null" 2>/dev/null)
+  linger_pid=$(cat "$linger_pid_file")
+  check "$k leftover coder helper still finishes DONE" "DONE" "$(echo "$out" | jq -r '.status')"
+  check "$k leftover coder helper is stopped" "0" "$(kill -0 "$linger_pid" 2>/dev/null && echo 1 || echo 0)"
+  check "$k leftover coder helper is committed work" "1" \
+    "$([[ -n "$(echo "$out" | jq -r '.commit_id')" ]] && echo 1 || echo 0)"
+  check "$k leftover coder helper is named in a warning" "1" \
+    "$(echo "$out" | jq -r '.warnings[]' | grep -c "after the coder exited: $linger_pid sleep 300")"
+  git -C "$WT" reset -q --hard HEAD~1
+done
+
+# --- a helper left running by a verification command is stopped, not fatal ---
+verify_linger="$TMP/verify-linger.pid"
+out=$(run --coder c-codex --verify-cmd "sleep 300 & echo \$! > '$verify_linger'" 2>/dev/null)
+check "leftover verification helper still finishes DONE" "DONE" "$(echo "$out" | jq -r '.status')"
+check "leftover verification helper is stopped" "0" \
+  "$(kill -0 "$(cat "$verify_linger")" 2>/dev/null && echo 1 || echo 0)"
+check "leftover verification helper is named in a warning" "1" \
+  "$(echo "$out" | jq -r '.warnings[]' | grep -c "after verification command")"
+out=$(run --coder c-codex --verify-cmd true 2>/dev/null)
+check "a run without leftovers has no warnings" "0" "$(echo "$out" | jq '.warnings | length')"
 
 # --- coder-owned Git changes are preserved and quarantined ---
 WT_TAMPER="$TMP/tamper-work"

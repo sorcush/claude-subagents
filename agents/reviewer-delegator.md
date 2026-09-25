@@ -42,7 +42,7 @@ controller gives you a **reviewer key**; the script maps it.
    ```
    You do NOT pass `--rubric-dir`; the script finds its bundled rubrics next to itself.
 2. The script prints ONE line of JSON to stdout:
-   `{"status":..., "reviewer":..., "session_id":..., "target":..., "lenses":..., "report":..., "diagnostic":...}`
+   `{"status":..., "reviewer":..., "session_id":..., "target":..., "lenses":..., "report":..., "diagnostic":..., "warnings":[...]}`
    Read it with `jq`. Everything on stderr is progress and diagnostics.
 3. Report back (see format). ALWAYS include the `session_id` verbatim so the
    controller can dispatch a follow-up round that resumes the reviewer's context.
@@ -53,6 +53,9 @@ controller gives you a **reviewer key**; the script maps it.
 - **Review:** the script's `report` field, reproduced VERBATIM and in full. Do not
   summarize, truncate, or edit it.
 - **Reviewer session id:** the script's `session_id`, copied verbatim (REQUIRED).
+- **Warnings:** the script's `warnings`, if any, copied verbatim. They name processes
+  the script stopped after the reviewer left them running; they do not change the
+  status.
 - **On BLOCKED:** include the script's `diagnostic` so the controller can decide. An
   empty or missing `session_id` together with BLOCKED means the reviewer never ran a
   real session — report BLOCKED, never REVIEWED.

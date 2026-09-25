@@ -10,10 +10,10 @@
 TIMEOUT_HIT=0
 RUN_GROUP_STOPPED=0
 RUN_GROUP_LINGERED=0
+RUN_GROUP_LEFTOVERS=""
 RUN_GROUP_ID=""
 
 TIMEOUT_EXIT=124   # same convention as GNU `timeout`
-LINGERING_EXIT=125
 UNCONTAINED_EXIT=126
 
 timeout_group_has_live_members() {  # <process-group-id>
@@ -24,6 +24,25 @@ timeout_group_has_live_members() {  # <process-group-id>
     $1 == wanted && $2 !~ /^Z/ { found=1 }
     END { exit(found ? 0 : 1) }
   ' <<<"$rows"
+}
+
+# timeout_group_members <process-group-id> -> one "pid command" line per live member.
+timeout_group_members() {
+  local pgid="$1"
+  ps -axo pgid=,pid=,stat=,command= 2>/dev/null | awk -v wanted="$pgid" '
+    $1 == wanted && $3 !~ /^Z/ {
+      line = $2
+      for (i = 4; i <= NF; i++) line = line " " $i
+      print substr(line, 1, 300)
+    }
+  '
+}
+
+# timeout_leftover_warning <what-exited> -> one line naming what had to be stopped.
+timeout_leftover_warning() {
+  local members
+  members="$(printf '%s\n' "$RUN_GROUP_LEFTOVERS" | awk 'NF' | paste -sd ';' - | sed 's/;/; /g')"
+  echo "stopped processes left running after $1 exited: ${members:-unknown}"
 }
 
 timeout_stop_group() {  # <process-group-id>
@@ -77,6 +96,7 @@ run_with_timeout_in() {
   TIMEOUT_HIT=0
   RUN_GROUP_STOPPED=0
   RUN_GROUP_LINGERED=0
+  RUN_GROUP_LEFTOVERS=""
   RUN_GROUP_ID=""
 
   # Save the caller's traps so they can be restored. `trap -` would discard
@@ -183,8 +203,15 @@ run_with_timeout_in() {
 
   [[ -s "$flag" ]] && TIMEOUT_HIT=1
 
+  # Some CLIs leave a helper of their own running after they exit (cursor-agent
+  # keeps a per-project worker alive for minutes). Stop the whole group and name
+  # what was left, so callers can warn. Once the group is confirmed gone,
+  # nothing can still be editing files, so the command's own status stands.
   if timeout_group_has_live_members "$RUN_GROUP_ID"; then
-    [[ "$TIMEOUT_HIT" -eq 0 ]] && RUN_GROUP_LINGERED=1
+    if [[ "$TIMEOUT_HIT" -eq 0 ]]; then
+      RUN_GROUP_LINGERED=1
+      RUN_GROUP_LEFTOVERS="$(timeout_group_members "$RUN_GROUP_ID")"
+    fi
     timeout_stop_group "$RUN_GROUP_ID" || true
   fi
 
@@ -201,6 +228,5 @@ run_with_timeout_in() {
   [[ -z "$gate" ]] || rm -f "$gate"
   [[ -z "$watchdog_pipe" ]] || rm -f "$watchdog_pipe"
   [[ "$TIMEOUT_HIT" -eq 1 ]] && return "$TIMEOUT_EXIT"
-  [[ "$RUN_GROUP_LINGERED" -eq 1 ]] && return "$LINGERING_EXIT"
   return "$rc"
 }

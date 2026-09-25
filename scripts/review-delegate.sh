@@ -107,19 +107,26 @@ ERR_FILE=$(mktemp)
 trap 'rm -f "$ERR_FILE"' EXIT
 SESSION_ID=""
 RESULT=""
+WARNINGS='[]'
 
 emit() {  # emit <status> <session> <report> <diagnostic>
   jq -nc --arg status "$1" --arg reviewer "$REVIEWER" --arg session "$2" \
          --arg target "$TARGET" --arg lenses "$LENSES" \
-         --arg report "$3" --arg diag "$4" \
+         --arg report "$3" --arg diag "$4" --argjson warnings "$WARNINGS" \
     '{status:$status, reviewer:$reviewer, session_id:$session, target:$target,
       lenses:($lenses|split(",")|map(select(length>0))),
-      report:$report, diagnostic:$diag}'
+      report:$report, diagnostic:$diag, warnings:$warnings}'
 }
 
 # harness_run is a PLAIN STATEMENT: it returns values in shell variables, which
 # a $(...) or a pipeline would discard in a subshell.
-if ! harness_run "read-only" "$ENTRY_MODEL" "$REPO_ROOT" "$(assemble_prompt)" "$SESSION"; then
+harness_run "read-only" "$ENTRY_MODEL" "$REPO_ROOT" "$(assemble_prompt)" "$SESSION"
+harness_rc=$?
+# Leftovers were already stopped and confirmed gone; they only earn a warning.
+if [[ "$RUN_GROUP_LINGERED" -eq 1 ]]; then
+  WARNINGS="$(jq -c --arg warning "$(timeout_leftover_warning "the reviewer")" '. + [$warning]' <<<"$WARNINGS")"
+fi
+if [[ "$harness_rc" -ne 0 ]]; then
   emit BLOCKED "$SESSION_ID" "" "reviewer invocation failed: $(cat "$ERR_FILE" 2>/dev/null)"
   exit 1
 fi
