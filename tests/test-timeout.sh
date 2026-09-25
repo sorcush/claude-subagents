@@ -118,19 +118,23 @@ else
   check "grandchild is really gone, not just unsignalable" "1" "$gone"
 fi
 
-# --- a successful direct child must not hide a lingering writer ---
+# --- a descendant left behind after a normal exit is stopped and reported ---
+# Some CLIs leave a helper of their own running after they exit. The helper is
+# stopped and named, but it does not replace the command's own exit status.
 cat > "$TMP/linger.sh" <<'LINGER'
 #!/usr/bin/env bash
 sleep 300 &
 echo $! > "$1"
-exit 0
+exit "${2:-0}"
 LINGER
 chmod +x "$TMP/linger.sh"
 
 run_with_timeout 10 "$TMP/linger.sh" "$TMP/linger.pid"
-check "normal exit with a live descendant is blocked" "125" "$?"
+check "normal exit with a live descendant keeps its own status" "0" "$?"
 check "lingering descendant is recorded" "1" "$RUN_GROUP_LINGERED"
 check "lingering process group is stopped" "1" "$RUN_GROUP_STOPPED"
+check "lingering descendant is named" "1" \
+  "$([[ "$RUN_GROUP_LEFTOVERS" == *"sleep 300"* ]] && echo 1 || echo 0)"
 
 linger=$(cat "$TMP/linger.pid" 2>/dev/null || echo "")
 if [[ -z "$linger" ]]; then
@@ -143,6 +147,15 @@ else
   done
   check "lingering child is gone" "1" "$gone"
 fi
+
+run_with_timeout 10 "$TMP/linger.sh" "$TMP/linger2.pid" 3
+check "failing exit with a live descendant keeps its own status" "3" "$?"
+check "failing exit still records the descendant" "1" "$RUN_GROUP_LINGERED"
+kill -0 "$(cat "$TMP/linger2.pid")" 2>/dev/null
+check "failing exit still stops the descendant" "1" "$?"
+
+run_with_timeout 10 true
+check "a clean run clears the leftover record" "0:" "$RUN_GROUP_LINGERED:$RUN_GROUP_LEFTOVERS"
 
 # Simulate a group that remains observable after cleanup without a shipped
 # test-only environment switch.

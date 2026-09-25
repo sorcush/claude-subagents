@@ -51,7 +51,8 @@ if ! jq -e '
   has("worktree_clean") and (.worktree_clean|type=="boolean") and
   has("writer_stopped") and (.writer_stopped|type=="boolean") and
   has("result") and (.result|type=="string") and
-  has("diagnostic") and (.diagnostic|type=="string")
+  has("diagnostic") and (.diagnostic|type=="string") and
+  has("warnings") and (.warnings|type=="array" and all(.[]; type=="string"))
 ' <<<"$line" >/dev/null 2>&1; then
   invalid "missing field or wrong field type"
 fi

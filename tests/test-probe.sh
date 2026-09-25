@@ -44,6 +44,21 @@ MOCK_LOG="$log" MOCK_RESULT=READY bash "$SCRIPT" --role reviewer --key c-codex >
 check "probe passes the pool's model" "1" "$(grep -c -- 'm-codex' "$log")"
 rm -f "$log"
 
+# A helper the CLI leaves running after it answers is stopped, not a failure.
+for k in c-cursor c-codex c-claude; do
+  out=$(MOCK_RESULT=READY MOCK_LINGER_PID_FILE="$TMP/probe-linger.pid" \
+        bash "$SCRIPT" --role reviewer --key "$k" 2>/dev/null)
+  check "$k probe with a leftover helper reports READY" "READY" "$(echo "$out" | jq -r '.status')"
+  kill -0 "$(cat "$TMP/probe-linger.pid")" 2>/dev/null
+  check "$k probe leftover helper is stopped" "1" "$?"
+done
+
+# A failure that produced no output still says what happened.
+out=$(MOCK_SILENT_EXIT=7 bash "$SCRIPT" --role reviewer --key c-cursor 2>/dev/null)
+check "silent probe failure reports FAILED" "FAILED" "$(echo "$out" | jq -r '.status')"
+check "silent probe failure names the exit status" "1" \
+  "$(echo "$out" | jq -r '.diagnostic' | grep -c 'no error output from the cursor CLI (exit status 7)')"
+
 # A reply that is not exactly READY is a failure. These cases exist because a
 # substring test would wrongly accept every one of them.
 for bad in "not ready" "NOTREADY" "READY now" "I am READY to begin" "ALREADY"; do

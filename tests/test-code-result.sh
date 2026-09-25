@@ -18,9 +18,9 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 result_file="$TMP/result.json"
 
-valid_changed='{"status":"DONE","coder":"c-codex","session_id":"sess-1","lifecycle_id":"1-2-3","attempts":0,"verification_mode":"commands","verification":[{"command":"true","exit_code":0,"timed_out":false,"output":""}],"verified":true,"changed":true,"commit_id":"abc123","files_changed":["a.txt"],"worktree_clean":true,"writer_stopped":true,"result":"done","diagnostic":""}'
-valid_unchanged='{"status":"DONE","coder":"c-codex","session_id":"sess-1","lifecycle_id":"1-2-3","attempts":0,"verification_mode":"none","verification":[],"verified":false,"changed":false,"commit_id":"","files_changed":[],"worktree_clean":true,"writer_stopped":true,"result":"done","diagnostic":""}'
-valid_blocked='{"status":"BLOCKED","coder":"c-codex","session_id":"sess-1","lifecycle_id":"1-2-3","attempts":1,"verification_mode":"commands","verification":[{"command":"false","exit_code":1,"timed_out":false,"output":"failed"}],"verified":false,"changed":true,"commit_id":"","files_changed":["a.txt"],"worktree_clean":false,"writer_stopped":true,"result":"claimed success","diagnostic":"verification failed"}'
+valid_changed='{"status":"DONE","coder":"c-codex","session_id":"sess-1","lifecycle_id":"1-2-3","attempts":0,"verification_mode":"commands","verification":[{"command":"true","exit_code":0,"timed_out":false,"output":""}],"verified":true,"changed":true,"commit_id":"abc123","files_changed":["a.txt"],"worktree_clean":true,"writer_stopped":true,"result":"done","diagnostic":"","warnings":[]}'
+valid_unchanged='{"status":"DONE","coder":"c-codex","session_id":"sess-1","lifecycle_id":"1-2-3","attempts":0,"verification_mode":"none","verification":[],"verified":false,"changed":false,"commit_id":"","files_changed":[],"worktree_clean":true,"writer_stopped":true,"result":"done","diagnostic":"","warnings":[]}'
+valid_blocked='{"status":"BLOCKED","coder":"c-codex","session_id":"sess-1","lifecycle_id":"1-2-3","attempts":1,"verification_mode":"commands","verification":[{"command":"false","exit_code":1,"timed_out":false,"output":"failed"}],"verified":false,"changed":true,"commit_id":"","files_changed":["a.txt"],"worktree_clean":false,"writer_stopped":true,"result":"claimed success","diagnostic":"verification failed","warnings":[]}'
 
 validate() {
   printf '%s\n' "$1" > "$result_file"
@@ -41,6 +41,12 @@ bash "$VALIDATOR" --exit-code 0 --result-file "$result_file" >/dev/null 2>&1
 check "multiple result lines are rejected" "2" "$?"
 validate "$(echo "$valid_changed" | jq -c 'del(.diagnostic)')" 0
 check "missing field is rejected" "2" "$?"
+validate "$(echo "$valid_changed" | jq -c 'del(.warnings)')" 0
+check "missing warnings is rejected" "2" "$?"
+validate "$(echo "$valid_changed" | jq -c '.warnings=[1]')" 0
+check "non-string warning is rejected" "2" "$?"
+validate "$(echo "$valid_changed" | jq -c '.warnings=["stopped leftover helper"]')" 0
+check "DONE with a warning passes" "0" "$?"
 validate "$(echo "$valid_changed" | jq -c '.attempts="zero"')" 0
 check "wrong field type is rejected" "2" "$?"
 validate "$(echo "$valid_changed" | jq -c '.files_changed=[1]')" 0
