@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `-c sandbox_mode="read-only"`.
 - The verify command ran in the caller's directory rather than the coder's.
 
+## [2.5.0] - 2026-09-28
+
+### Fixed
+- stop leftover processes without blocking finished work
+
 ## [2.4.0] - 2026-09-14
 
 ### Added
