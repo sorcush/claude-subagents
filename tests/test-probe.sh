@@ -27,7 +27,9 @@ cat > "$TMP/reviewers.json" <<'EOF'
 {"reviewers":[
   {"key":"c-cursor","label":"Cursor","harness":"cursor","model":"m-cursor"},
   {"key":"c-codex","label":"Codex","harness":"codex","model":"m-codex"},
-  {"key":"c-claude","label":"Claude","harness":"claude","model":"m-claude"}]}
+  {"key":"c-claude","label":"Claude","harness":"claude","model":"m-claude"},
+  {"key":"c-codex-high","label":"Codex High","harness":"codex","model":"m-codex","effort":"high"},
+  {"key":"c-cursor-high","label":"Cursor High","harness":"cursor","model":"m-cursor","effort":"high"}]}
 EOF
 export CSC_REVIEWERS_JSON="$TMP/reviewers.json"
 
@@ -42,7 +44,19 @@ done
 log="$TMP/args.log"
 MOCK_LOG="$log" MOCK_RESULT=READY bash "$SCRIPT" --role reviewer --key c-codex >/dev/null 2>&1
 check "probe passes the pool's model" "1" "$(grep -c -- 'm-codex' "$log")"
+check "probe sends no effort when the entry sets none" "0" "$(grep -c -- 'model_reasoning_effort' "$log")"
 rm -f "$log"
+
+# The pool's effort reaches Codex as a config override.
+MOCK_LOG="$log" MOCK_RESULT=READY bash "$SCRIPT" --role reviewer --key c-codex-high >/dev/null 2>&1
+check "probe passes the pool's effort" "1" "$(grep -c -- '-c model_reasoning_effort="high"' "$log")"
+rm -f "$log"
+
+# A harness that cannot send an effort refuses the entry instead of ignoring it.
+MOCK_RESULT=READY bash "$SCRIPT" --role reviewer --key c-cursor-high >/dev/null 2>&1
+check "effort on a cursor entry exits 2" "2" "$?"
+err=$(MOCK_RESULT=READY bash "$SCRIPT" --role reviewer --key c-cursor-high 2>&1 >/dev/null)
+check "effort refusal names the field" "1" "$([[ "$err" == *"does not support the 'effort' field"* ]] && echo 1 || echo 0)"
 
 # A helper the CLI leaves running after it answers is stopped, not a failure.
 for k in c-cursor c-codex c-claude; do

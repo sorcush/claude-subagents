@@ -64,7 +64,7 @@ fi
 
 pool_load "$(pool_file_for reviewer)" reviewer
 pool_get "$REVIEWER"
-harness_load "$ENTRY_HARNESS"
+harness_load "$ENTRY_HARNESS" "$ENTRY_EFFORT"
 
 # Ground the reviewer in the document's own repository when it has one.
 resolve_root() {
@@ -120,7 +120,7 @@ emit() {  # emit <status> <session> <report> <diagnostic>
 
 # harness_run is a PLAIN STATEMENT: it returns values in shell variables, which
 # a $(...) or a pipeline would discard in a subshell.
-harness_run "read-only" "$ENTRY_MODEL" "$REPO_ROOT" "$(assemble_prompt)" "$SESSION"
+harness_run "read-only" "$ENTRY_MODEL" "$REPO_ROOT" "$(assemble_prompt)" "$SESSION" "$ENTRY_EFFORT"
 harness_rc=$?
 # Leftovers were already stopped and confirmed gone; they only earn a warning.
 if [[ "$RUN_GROUP_LINGERED" -eq 1 ]]; then

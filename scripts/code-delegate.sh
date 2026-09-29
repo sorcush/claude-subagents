@@ -152,7 +152,7 @@ CWD="$LIFECYCLE_WORKTREE"
 
 pool_load "$(pool_file_for coder)" coder
 pool_get "$CODER"
-harness_load "$ENTRY_HARNESS"
+harness_load "$ENTRY_HARNESS" "$ENTRY_EFFORT"
 
 ERR_FILE=$(mktemp)
 SESSION_ID=""
@@ -340,7 +340,7 @@ run_coder() {
     WRITER_STOPPED=false
     return "$UNCONTAINED_EXIT"
   fi
-  harness_run "edit" "$ENTRY_MODEL" "$CWD" "$prompt" "$session"
+  harness_run "edit" "$ENTRY_MODEL" "$CWD" "$prompt" "$session" "$ENTRY_EFFORT"
   rc=$?
   record_writer_result "the coder"
   return "$rc"

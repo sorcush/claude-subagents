@@ -29,6 +29,10 @@ Each entry has this shape:
 - `label` — what the user sees in the menu.
 - `harness` — which tool runs the model (`cursor`, `codex`, or `claude`).
 - `model` — the model id that harness understands.
+- `effort` — optional; the reasoning effort sent to the model (`minimal`, `low`,
+  `medium`, `high`, or `xhigh`). Only the `codex` harness supports it; a `cursor` or
+  `claude` entry that sets it is refused when used. Without it, Codex uses the
+  effort from your own Codex config.
 - `default` — optional; marks the recommended entry in the menu.
 
 See the shipped pool files for the current entries. Run `make models` to print both

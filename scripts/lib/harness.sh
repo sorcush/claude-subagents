@@ -5,11 +5,13 @@
 HARNESS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_DIR="$(cd "$HARNESS_LIB_DIR/../harness" && pwd)"
 
-# harness_load <name> — sources scripts/harness/<name>.sh.
+# harness_load <name> [effort] — sources scripts/harness/<name>.sh.
 # The name was already checked against ^[a-z][a-z0-9-]*$ by pool_load, so it
-# cannot escape this directory.
+# cannot escape this directory. A harness that cannot pass an effort to its CLI
+# does not define harness_supports_effort; an entry that sets one is refused
+# rather than silently run at the CLI's own default.
 harness_load() {
-  local name="$1" file="$HARNESS_DIR/$1.sh"
+  local name="$1" effort="${2:-}" file="$HARNESS_DIR/$1.sh"
   [[ -r "$file" ]] || { echo "error: harness file not found: $file" >&2; exit 2; }
   # shellcheck source=/dev/null
   source "$file"
@@ -18,6 +20,10 @@ harness_load() {
     declare -F "$fn" >/dev/null \
       || { echo "error: harness '$name' does not define $fn" >&2; exit 2; }
   done
+  if [[ -n "$effort" ]] && ! declare -F harness_supports_effort >/dev/null; then
+    echo "error: harness '$name' does not support the 'effort' field; remove it from the pool entry" >&2
+    exit 2
+  fi
 }
 
 # harness_is_ready <text> -> 0 only when the reply is exactly the word READY.

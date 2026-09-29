@@ -2,9 +2,10 @@
   "reviewers": [
     {
       "key": "codex-sol",
-      "label": "Codex GPT-5.6 Sol",
+      "label": "Codex GPT-6 Sol",
       "harness": "codex",
-      "model": "gpt-5.6-sol",
+      "model": "gpt-6-sol",
+      "effort": "high",
       "default": true
     },
     {

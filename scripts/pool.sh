@@ -25,7 +25,9 @@ case "$cmd" in
     pool_get "$key"
     jq -nc --arg key "$ENTRY_KEY" --arg label "$ENTRY_LABEL" \
            --arg harness "$ENTRY_HARNESS" --arg model "$ENTRY_MODEL" \
-      '{key:$key, label:$label, harness:$harness, model:$model}'
+           --arg effort "$ENTRY_EFFORT" \
+      '{key:$key, label:$label, harness:$harness, model:$model}
+       + (if $effort == "" then {} else {effort:$effort} end)'
     ;;
   *) usage; exit 2 ;;
 esac

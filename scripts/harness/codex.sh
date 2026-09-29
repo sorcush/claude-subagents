@@ -4,6 +4,16 @@
 
 CSC_CODEX_BIN="${CSC_CODEX_BIN:-codex}"
 
+harness_supports_effort() { return 0; }
+
+# codex_effort_args <effort> -> sets CODEX_EFFORT_ARGS; empty effort adds nothing,
+# so Codex falls back to the user's own config.
+codex_effort_args() {
+  CODEX_EFFORT_ARGS=()
+  [[ -n "$1" ]] && CODEX_EFFORT_ARGS=(-c "model_reasoning_effort=\"$1\"")
+  return 0
+}
+
 harness_render() {  # <json-line>
   local line="$1" type itype text
   type=$(jq -r '.type // ""' <<<"$line" 2>/dev/null) || return 0
@@ -14,8 +24,8 @@ harness_render() {  # <json-line>
   echo "  -> ${itype}${text:+ ($text)}" >&2
 }
 
-harness_probe() {
-  local model="$1" out rc
+harness_probe() {  # <model> [effort]
+  local model="$1" effort="${2:-}" out rc
   PROBE_REASON=""
   PROBE_EXIT=""
   if ! command -v "$CSC_CODEX_BIN" >/dev/null 2>&1 && [[ ! -x "$CSC_CODEX_BIN" ]]; then
@@ -24,8 +34,9 @@ harness_probe() {
   out=$(mktemp)
   # shellcheck disable=SC2064
   trap "rm -f '$out'" RETURN
+  codex_effort_args "$effort"
   run_with_timeout "${CSC_PROBE_TIMEOUT:-120}" \
-    "$CSC_CODEX_BIN" exec --json -s read-only -m "$model" \
+    "$CSC_CODEX_BIN" exec --json -s read-only -m "$model" "${CODEX_EFFORT_ARGS[@]}" \
     "Reply with the single word READY." >"$out" 2>>"$ERR_FILE" </dev/null
   rc=$?
   PROBE_EXIT=$rc
@@ -46,8 +57,8 @@ harness_probe() {
   return 0
 }
 
-harness_run() {
-  local mode="$1" model="$2" dir="$3" prompt="$4" sess="$5"
+harness_run() {  # <mode> <model> <dir> <prompt> <session> [effort]
+  local mode="$1" model="$2" dir="$3" prompt="$4" sess="$5" effort="${6:-}"
   local outfile rc line type itype turn_failed="" fail_msg="" got_answer=""
   : > "$ERR_FILE"
   outfile=$(mktemp)
@@ -70,7 +81,8 @@ harness_run() {
       cmd+=(-s workspace-write)
     fi
   fi
-  cmd+=("$prompt")
+  codex_effort_args "$effort"
+  cmd+=("${CODEX_EFFORT_ARGS[@]}" "$prompt")
 
   # resume has no -C. Let the timeout helper enter $dir for both paths so its
   # process-group state remains visible in this shell after the command exits.

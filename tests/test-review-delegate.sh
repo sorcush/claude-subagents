@@ -32,7 +32,8 @@ cat > "$TMP/reviewers.json" <<'EOF'
 {"reviewers":[
   {"key":"r-cursor","label":"Cursor","harness":"cursor","model":"m-cursor"},
   {"key":"r-codex","label":"Codex","harness":"codex","model":"m-codex"},
-  {"key":"r-claude","label":"Claude","harness":"claude","model":"m-claude"}]}
+  {"key":"r-claude","label":"Claude","harness":"claude","model":"m-claude"},
+  {"key":"r-codex-high","label":"Codex High","harness":"codex","model":"m-codex","effort":"high"}]}
 EOF
 export CSC_REVIEWERS_JSON="$TMP/reviewers.json"
 
@@ -101,6 +102,15 @@ log="$TMP/args.log"
 MOCK_LOG="$log" run --reviewer r-codex --target spec --session prev-1 >/dev/null 2>&1
 has "codex resume uses the resume subcommand" "resume prev-1" "$log"
 has "codex resume forces read-only via -c"    'sandbox_mode="read-only"' "$log"
+rm -f "$log"
+
+# The pool's effort reaches Codex on both a new review and a resumed one.
+log="$TMP/args.log"
+MOCK_LOG="$log" run --reviewer r-codex-high --target spec >/dev/null 2>&1
+has "codex new call sends the pool's effort"    -- '-c model_reasoning_effort="high"' "$log"
+rm -f "$log"
+MOCK_LOG="$log" run --reviewer r-codex-high --target spec --session prev-3 >/dev/null 2>&1
+has "codex resume sends the pool's effort"      -- '-c model_reasoning_effort="high"' "$log"
 rm -f "$log"
 
 log="$TMP/args.log"

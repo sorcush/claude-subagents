@@ -51,12 +51,13 @@ pool_load() {
       if ($e|type) != "object" then "ERR entry \($i) is not an object"
       else
         [ $i,
-          (($e|keys) - ["key","label","harness","model","default"] | join(",")),
+          (($e|keys) - ["key","label","harness","model","default","effort"] | join(",")),
           ($e.key|type),     ($e.key     // "" | tostring),
           ($e.label|type),   (($e.label|type) == "string" and ($e.label|test("^[ -~]+$"))),
           ($e.harness|type), ($e.harness // "" | tostring),
           ($e.model|type),   ($e.model   // "" | tostring),
-          ($e.default|type), ($e.default // false | tostring)
+          ($e.default|type), ($e.default // false | tostring),
+          ($e.effort|type),  ($e.effort  // "" | tostring)
         ] | @tsv
       end
     end
@@ -67,7 +68,7 @@ pool_load() {
   esac
 
   local seen_keys="" defaults=0
-  local line i extra ktype ekey ltype label_ok htype eharness mtype emodel dtype dval
+  local line i extra ktype ekey ltype label_ok htype eharness mtype emodel dtype dval etype eeffort
   local pair f ty cols
 
   # A while loop fed by a here-string runs in THIS shell, not a subshell, so
@@ -82,7 +83,7 @@ pool_load() {
     esac
 
     # Bash read drops empty tab-separated fields; awk preserves them.
-    mapfile -t cols < <(awk -F'\t' '{for (i=1; i<=12; i++) print (i<=NF ? $i : "")}' <<<"$line")
+    mapfile -t cols < <(awk -F'\t' '{for (i=1; i<=14; i++) print (i<=NF ? $i : "")}' <<<"$line")
     i="${cols[0]}"
     extra="${cols[1]}"
     ktype="${cols[2]}"
@@ -95,6 +96,8 @@ pool_load() {
     emodel="${cols[9]}"
     dtype="${cols[10]}"
     dval="${cols[11]}"
+    etype="${cols[12]}"
+    eeffort="${cols[13]}"
 
     [[ -z "$extra" ]] || pool_die "$file: entry $i has unknown field(s): $extra"
 
@@ -110,6 +113,13 @@ pool_load() {
     [[ "$emodel"   =~ ^[A-Za-z0-9._+-]+$ ]]   || pool_die "$file: entry $i model '$emodel' must match ^[A-Za-z0-9._+-]+$"
     [[ "$label_ok" == "true" ]] \
       || pool_die "$file: entry $i label must be non-empty printable ASCII on a single line"
+
+    case "$etype" in
+      null)   ;;
+      string) [[ "$eeffort" =~ ^(minimal|low|medium|high|xhigh)$ ]] \
+                || pool_die "$file: entry $i effort '$eeffort' must be one of minimal, low, medium, high, xhigh" ;;
+      *)      pool_die "$file: entry $i field 'effort' must be a string" ;;
+    esac
 
     [[ -r "$POOL_HARNESS_DIR/$eharness.sh" ]] \
       || pool_die "$file: entry $i harness file not found: $POOL_HARNESS_DIR/$eharness.sh"
@@ -139,15 +149,17 @@ pool_list_json() {
     <<<"$POOL_JSON"
 }
 
-# pool_get <key> -> sets ENTRY_KEY/ENTRY_LABEL/ENTRY_HARNESS/ENTRY_MODEL.
+# pool_get <key> -> sets ENTRY_KEY/ENTRY_LABEL/ENTRY_HARNESS/ENTRY_MODEL/ENTRY_EFFORT.
+# ENTRY_EFFORT is empty when the entry sets no effort. It is the last column, so
+# read's collapsing of empty tab-separated fields cannot shift the others.
 pool_get() {
   local want="$1" row valid
   row="$(jq -r --arg role "$POOL_ROLE_KEY" --arg k "$want" \
-        '[ .[$role][] | select(.key == $k) | .key, .label, .harness, .model ] | @tsv' \
+        '[ .[$role][] | select(.key == $k) | .key, .label, .harness, .model, (.effort // "") ] | @tsv' \
         <<<"$POOL_JSON")"
   if [[ -z "$row" ]]; then
     valid="$(jq -r --arg role "$POOL_ROLE_KEY" '[.[$role][].key]|join(", ")' <<<"$POOL_JSON")"
     pool_die "unknown key '$want'. Valid keys: $valid"
   fi
-  IFS=$'\t' read -r ENTRY_KEY ENTRY_LABEL ENTRY_HARNESS ENTRY_MODEL <<< "$row"
+  IFS=$'\t' read -r ENTRY_KEY ENTRY_LABEL ENTRY_HARNESS ENTRY_MODEL ENTRY_EFFORT <<< "$row"
 }

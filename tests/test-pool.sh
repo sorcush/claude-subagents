@@ -60,10 +60,12 @@ write two-defaults.json '{"reviewers":[{"key":"a","label":"A","harness":"codex",
 write bad-default.json '{"reviewers":[{"key":"a","label":"A","harness":"codex","model":"m","default":"yes"}]}'
 write newline-label.json '{"reviewers":[{"key":"a","label":"A\nB","harness":"codex","model":"m"}]}'
 write extra-toplevel.json '{"reviewers":[{"key":"a","label":"A","harness":"codex","model":"m"}],"extra":1}'
+write bad-effort.json '{"reviewers":[{"key":"a","label":"A","harness":"codex","model":"m","effort":"hihg"}]}'
+write effort-not-string.json '{"reviewers":[{"key":"a","label":"A","harness":"codex","model":"m","effort":3}]}'
 
 for f in not-json wrong-key not-array empty not-object extra-key no-label bad-key \
          bad-model bad-harness traversal absent-harness dup-key two-defaults \
-         bad-default newline-label extra-toplevel; do
+         bad-default newline-label extra-toplevel bad-effort effort-not-string; do
   check "rejects $f" "2" "$(rc_of "$f.json")"
 done
 
@@ -73,6 +75,13 @@ check "missing file exits 2" "2" "$(rc_of does-not-exist.json)"
 out=$(CSC_REVIEWERS_JSON="$TMP/good.json" bash "$CLI" get reviewers b-two 2>/dev/null)
 check "get returns the model"  "m.2"    "$(echo "$out" | jq -r '.model')"
 check "get returns harness"    "cursor" "$(echo "$out" | jq -r '.harness')"
+
+check "get omits effort when unset" "false" "$(echo "$out" | jq -r 'has("effort")')"
+
+write effort.json '{"reviewers":[{"key":"a","label":"A","harness":"codex","model":"m","effort":"high"}]}'
+check "accepts an effort" "0" "$(rc_of effort.json)"
+out=$(CSC_REVIEWERS_JSON="$TMP/effort.json" bash "$CLI" get reviewers a 2>/dev/null)
+check "get returns the effort" "high" "$(echo "$out" | jq -r '.effort')"
 
 CSC_REVIEWERS_JSON="$TMP/good.json" bash "$CLI" get reviewers nope >/dev/null 2>&1
 check "unknown key exits 2" "2" "$?"

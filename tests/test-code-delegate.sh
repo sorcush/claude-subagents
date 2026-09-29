@@ -27,7 +27,8 @@ cat > "$TMP/coders.json" <<'EOF'
 {"coders":[
   {"key":"c-cursor","label":"Cursor","harness":"cursor","model":"m-cursor"},
   {"key":"c-codex","label":"Codex","harness":"codex","model":"m-codex"},
-  {"key":"c-claude","label":"Claude","harness":"claude","model":"m-claude"}]}
+  {"key":"c-claude","label":"Claude","harness":"claude","model":"m-claude"},
+  {"key":"c-codex-high","label":"Codex High","harness":"codex","model":"m-codex","effort":"high"}]}
 EOF
 export CSC_CODERS_JSON="$TMP/coders.json"
 
@@ -90,6 +91,12 @@ check "mock edit leaves worktree clean" "true" "$(echo "$out" | jq -r '.worktree
 check "mock edit reports writer stopped" "true" "$(echo "$out" | jq -r '.writer_stopped')"
 check "mock edit commit exists" "1" "$(git -C "$WT" cat-file -e "$edit_commit^{commit}" 2>/dev/null && echo 1 || echo 0)"
 check "mock edit worktree is actually clean" "" "$(git -C "$WT" status --porcelain)"
+
+# The pool's effort reaches the Codex coder.
+log="$TMP/args.log"
+MOCK_LOG="$log" run --coder c-codex-high --verify-cmd "true" >/dev/null 2>&1
+check "codex coder sends the pool's effort" "1" "$(grep -c -F -- '-c model_reasoning_effort="high"' "$log")"
+rm -f "$log"
 
 before_no_change=$(git -C "$WT" rev-parse HEAD)
 out=$(run --coder c-codex --verify-cmd "true" 2>/dev/null)

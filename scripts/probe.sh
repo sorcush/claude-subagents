@@ -29,7 +29,7 @@ PROBE_REASON=""
 
 pool_load "$(pool_file_for "$ROLE")" "$ROLE"
 pool_get "$KEY"
-harness_load "$ENTRY_HARNESS"
+harness_load "$ENTRY_HARNESS" "$ENTRY_EFFORT"
 
 emit() {  # emit <status> <reason> <diagnostic>
   jq -nc --arg status "$1" --arg role "$ROLE" --arg key "$KEY" \
@@ -37,7 +37,7 @@ emit() {  # emit <status> <reason> <diagnostic>
     '{status:$status, role:$role, key:$key, reason:$reason, diagnostic:$diag}'
 }
 
-if harness_probe "$ENTRY_MODEL"; then
+if harness_probe "$ENTRY_MODEL" "$ENTRY_EFFORT"; then
   emit READY "" ""
   exit 0
 fi
