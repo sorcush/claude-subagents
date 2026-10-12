@@ -25,7 +25,7 @@ harness_probe() {
   # shellcheck disable=SC2064
   trap "rm -f '$out'" RETURN
   run_with_timeout "${CSC_PROBE_TIMEOUT:-120}" \
-    "$CSC_CLAUDE_BIN" -p --model "$model" --output-format stream-json \
+    "$CSC_CLAUDE_BIN" -p --model "$model" --output-format stream-json --verbose \
     --allowedTools "Read" --permission-mode dontAsk \
     "Reply with the single word READY." >"$out" 2>>"$ERR_FILE" </dev/null
   rc=$?
@@ -62,7 +62,7 @@ harness_run() {
   SESSION_ID=""
   RESULT=""
 
-  local -a cmd=("$CSC_CLAUDE_BIN" -p --model "$model" --output-format stream-json)
+  local -a cmd=("$CSC_CLAUDE_BIN" -p --model "$model" --output-format stream-json --verbose)
   if [[ "$mode" == "read-only" ]]; then
     cmd+=(--allowedTools "Read Grep Glob" --permission-mode dontAsk)
   else
