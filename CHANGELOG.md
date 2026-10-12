@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `-c sandbox_mode="read-only"`.
 - The verify command ran in the caller's directory rather than the coder's.
 
+## [2.7.0] - 2026-10-12
+
+### Added
+- move reviewers to GPT-6.1 Sol, Grok 4.7 and Opus 5.5; fix Claude harness
+
 ## [2.6.0] - 2026-09-29
 
 ### Added
